@@ -1,0 +1,220 @@
+---
+title: End-to-end tests
+description: Run Prysm's end-to-end tests, which start an execution chain, boot node, beacon nodes and validators and check the network with evaluators, and investigate failures from their logs.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+
+Unit tests check packages in isolation. The end-to-end (E2E) tests in `testing/endtoend/` start a complete private network from the binaries you built, run it for several epochs, and check at every epoch that it behaves: validators attest, blocks are proposed, the chain finalizes, forks happen, a new node syncs. CI runs them on every pull request, so run the relevant one locally when your change touches how components interact.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/) and check that `bazel build //cmd/beacon-chain //cmd/validator` works.
+- Time. The first run builds Geth and Web3Signer as well as Prysm, and a minimal-preset run takes several minutes of wall-clock time on top of that.
+- Free ports. Tests use ports from 2150 upwards, derived from the shard index.
+- For the Kurtosis test only: Docker and a running [Kurtosis](https://docs.kurtosis.com/install/) engine.
+
+## What a test starts
+
+The test harness (`testing/endtoend/endtoend_test.go` and `component_handler_test.go`) starts these components, in order, as separate processes:
+
+1. A tracing sink that receives the nodes' traces.
+2. A boot node (`//tools/bootnode`) for peer discovery.
+3. An execution chain: a Geth miner, built from source, that other Geth nodes follow. A depositor sends the validators' deposits to it.
+4. Optionally, a mock block builder and Web3Signer, depending on the test.
+5. Two Prysm beacon nodes (`StandardBeaconCount` in `testing/endtoend/params`), each with its own Geth node, and Lighthouse beacon nodes in the multi-client tests.
+6. Validator clients for the beacon nodes. Some tests run the latest released validator through `prysm.sh` instead, to check that `HEAD` stays compatible with it.
+7. Later in the run, extra beacon nodes that sync from the others, from genesis and with checkpoint sync.
+
+The chain uses a dedicated E2E configuration (`params.E2ETestConfig()`) with short slots and epochs and early fork epochs, so a run covers several forks in minutes.
+
+## Test targets
+
+All E2E targets are in `testing/endtoend/BUILD.bazel`. They're tagged `manual`, so `bazel test //...` never runs them; name them explicitly.
+
+| Target | Tests it contains | When CI runs it |
+| --- | --- | --- |
+| `:go_default_test` | `TestEndToEnd_MinimalConfig`, `TestEndToEnd_MinimalConfig_WithStateDiff`, `TestEndToEnd_Slasher_MinimalConfig`, `TestEndToEnd_SlasherSimulator` | Every pull request (the `:presubmit` suite) |
+| `:go_builder_test` | `TestEndToEnd_MinimalConfig_WithBuilder`, `…_WithBuilder_ValidatorRESTApi` | After merge (`:postsubmit`) |
+| `:go_minimal_postmerge_test` | `TestEndToEnd_MinimalConfig_PostMerge`: from Bellatrix through every later fork | After merge |
+| `:go_mainnet_test` | `TestEndToEnd_MainnetConfig_ValidatorAtCurrentRelease`, `TestEndToEnd_MainnetConfig_MultiClient` (with Lighthouse) | After merge |
+| `:go_minimal_scenario_test` | `TestEndToEnd_MultiScenarioRun`, `…_Web3Signer`, `…_Web3Signer_PersistentKeys`, `…_CurrentFork`, `…_ValidatorRESTApi`, `…_ValidatorRESTApi_SSZ`, `TestEndToEnd_ScenarioRun_EEOffline` | Occasionally (`:scenario_tests`) |
+| `:go_mainnet_scenario_test` | `TestEndToEnd_MultiScenarioRun_Multiclient` | Occasionally |
+| `:go_minimal_kurtosis_test` | `TestEndToEnd_Kurtosis_MinimalConfig`: a Kurtosis `ethereum-package` devnet using locally built images | On demand |
+
+The minimal and mainnet targets set `eth_network`, so they build the right preset on their own. You don't need `--config=minimal`.
+
+## Run a test
+
+<Steps>
+
+1. Run the presubmit test that covers most changes, with its output streamed:
+
+   ```bash
+   bazel test //testing/endtoend:go_default_test \
+     --config=e2e \
+     --test_filter='TestEndToEnd_MinimalConfig$' \
+     --test_output=streamed
+   ```
+
+   `--config=e2e` builds the test with the `debug` Go build tag, as CI does. Without `--test_filter`, every test in the target runs.
+
+2. Watch the evaluators. The test prints one subtest per evaluator and epoch, for example `peers_connect_epoch_0` or `finalizes_at_epoch_3`, with `PASS` or `FAIL`.
+
+3. Read the summary at the end:
+
+   ```text
+   //testing/endtoend:go_default_test                                      PASSED in 612.4s
+   ```
+
+</Steps>
+
+To run a whole CI group, use the suite targets. They include tests tagged `exclusive`, so Bazel runs them one at a time:
+
+```bash
+bazel test //testing/endtoend:presubmit --config=e2e
+```
+
+### Change the run length and seed
+
+| Variable | Effect |
+| --- | --- |
+| `E2E_EPOCHS` | Number of epochs to run. Tests that set their own length with `types.WithEpochs(…)`, such as `TestEndToEnd_MinimalConfig` (10 epochs), ignore it. |
+| `E2E_SEED` | Seed for the random parts of a scenario, so you can replay a failing run. |
+| `E2E_LOG_PATH` | Directory for component logs, instead of Bazel's undeclared outputs. |
+| `E2E_LOG_COLOR=1` | Keeps colors in the component logs. |
+
+Pass them with `--test_env`, for example `--test_env=E2E_SEED=42`. The default timeout of a `size = "enormous"` test is one hour; add `--test_timeout=<seconds>` for longer runs.
+
+### Run the Kurtosis test
+
+`TestEndToEnd_Kurtosis_MinimalConfig` builds the beacon node and validator images (`oci_image_tarball_e2e`), loads them into Docker, and runs the devnet in `testing/endtoend/network-config/minimal.yaml` with [ethereum-package](https://github.com/ethpandaops/ethereum-package) for five epochs. It checks the network with [Assertoor](https://github.com/ethpandaops/assertoor) playbooks.
+
+```bash
+kurtosis engine start
+bazel test //testing/endtoend:go_minimal_kurtosis_test --test_output=streamed
+```
+
+The test creates an enclave named `minimal` and removes it when it finishes. If it fails, it prints the logs of the failed Assertoor checks first.
+
+## How the tests are built
+
+An E2E test is a Go test built from three kinds of pieces.
+
+### Components
+
+A component is a process the test starts and controls. Each implements `ComponentRunner` from `testing/endtoend/types`:
+
+```go title="testing/endtoend/types/types.go"
+type ComponentRunner interface {
+	// Start starts a component.
+	Start(ctx context.Context) error
+	// Started checks whether an underlying component is started and ready to be queried.
+	Started() <-chan struct{}
+	// Pause pauses a component.
+	Pause() error
+	// Resume resumes a component.
+	Resume() error
+	// Stop stops a component.
+	Stop() error
+	// UnderlyingProcess is the underlying process, once started.
+	UnderlyingProcess() *os.Process
+}
+```
+
+Implementations are in `testing/endtoend/components/` (beacon nodes, validators, boot node, Lighthouse, Web3Signer, builder) and `components/eth1/` (Geth miner, nodes, proxies, depositor). Scenario tests use `Pause` and `Resume` to take nodes or execution clients offline and check that the network recovers.
+
+### Evaluators
+
+An evaluator checks one property of the running network:
+
+```go title="testing/endtoend/types/types.go"
+type Evaluator struct {
+	Name   string
+	Policy func(currentEpoch primitives.Epoch) bool
+	// Evaluation accepts one or many/all conns, depending on what is needed by the set of evaluators.
+	Evaluation func(ec *EvaluationContext, conn ...*grpc.ClientConn) error
+}
+```
+
+At the start of each epoch, the runner calls every evaluator whose `Policy` returns `true` for that epoch, and fails the test if `Evaluation` returns an error. Evaluators live in `testing/endtoend/evaluators/`; those that check the Beacon API responses are in `evaluators/beaconapi/`. Each test picks its list; `e2eMinimal` in `endtoend_setup_test.go` shows the standard set, including peer checks, finality, participation, fork transitions, blob limits, exits and withdrawals.
+
+### Policies
+
+Policies decide which epochs an evaluator runs in. The helpers in `testing/endtoend/policies/policies.go` are `AllEpochs`, `OnEpoch(n)`, `AfterNthEpoch(n)`, `OnwardsNthEpoch(n)`, `BetweenEpochs(a, b)` and `EveryNEpochs(start, n)`.
+
+### Test options
+
+Tests configure the run with options from `testing/endtoend/types`, such as `WithCheckpointSync()`, `WithEpochs(n)`, `WithExitEpoch(e)`, `WithBuilder()`, `WithRemoteSigner()`, `WithValidatorRESTApi()`, `WithSSZOnly()`, `WithLargeBlobs()` and `WithStateDiff()`.
+
+## Test a feature flag in E2E
+
+To run the E2E beacon nodes or validators with your feature flag, add it to `E2EBeaconChainFlags` or `E2EValidatorFlags` in `config/features/flags.go`:
+
+```go title="config/features/flags.go"
+var E2EBeaconChainFlags = []string{
+	"--dev",
+	"--<YOUR_FLAG>",
+}
+```
+
+For flags used by one test only, add them to that test's `BeaconFlags` or `ValidatorFlags` through an option, the way `WithStateDiff()` does.
+
+## Investigate a failure
+
+<Steps>
+
+1. Find the failing evaluator in the output. The subtest name tells you what failed and in which epoch:
+
+   ```text
+   --- FAIL: TestEndToEnd_MinimalConfig/finalizes_at_epoch_3 (0.01s)
+   ```
+
+   The line above it shows the error the evaluator returned.
+
+2. Open the component logs. Each run writes them to `$TEST_UNDECLARED_OUTPUTS_DIR/<date>/<time>/<test name>/`, which Bazel zips into the test's output directory. `go_default_test` has two shards, so look in the shard that ran your test:
+
+   ```bash
+   ls bazel-testlogs/testing/endtoend/go_default_test/shard_*_of_2/test.outputs/
+   unzip -d /tmp/e2e-logs bazel-testlogs/testing/endtoend/go_default_test/shard_1_of_2/test.outputs/outputs.zip
+   ```
+
+3. Read the logs of the component involved:
+
+   | File | Component |
+   | --- | --- |
+   | `beacon-<N>.log`, `beacon_node_<N>_stderr.log` | Prysm beacon node `N` |
+   | `vals-<N>.log` | Validator client `N` |
+   | `bootnode.log` | Boot node |
+   | `eth1_miner.log`, `eth1_<N>.log`, `eth1-init_*.log` | Geth miner and nodes, and their genesis initialization |
+   | `web3signer.stderr.log` | Web3Signer |
+   | `lighthouse_beacon_node_<N>.log` | Lighthouse beacon node (multi-client tests) |
+   | `builder_<N>.log` | Mock builder |
+
+4. Replay the run with the same seed if the test uses randomness: `--test_env=E2E_SEED=<SEED>`.
+
+</Steps>
+
+## Check that it works
+
+```bash
+bazel test //testing/endtoend:go_default_test --config=e2e --test_filter='TestEndToEnd_MinimalConfig$'
+```
+
+The target reports `PASSED`.
+
+## Troubleshooting
+
+**`bind: address already in use`.** Something else uses the E2E ports, often a leftover process from an interrupted run, or two E2E targets running at once. Stop leftover `beacon-chain`, `validator` and `geth` processes and run one E2E target at a time.
+
+**The test times out during `chain started`.** A component didn't come up. Check `bootnode.log`, the `eth1-init_*` and `eth1_*` logs, and `beacon-0.log` in the outputs for the first error.
+
+**`TestEndToEnd_Kurtosis_MinimalConfig` fails with `get kurtosis context from local engine`.** The Kurtosis engine isn't running. Start it with `kurtosis engine start`.
+
+**`E2E_EPOCHS` has no effect.** The test sets its own length with `WithEpochs`. Change the option in the test, or run a test that doesn't set it.
+
+## Next steps
+
+- [Run a local devnet](/developers/local-devnet/)
+- [Debugging and profiling](/developers/debugging/)
+- [Contribute a change](/developers/contributing/)

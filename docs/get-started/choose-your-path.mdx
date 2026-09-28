@@ -1,0 +1,20 @@
+---
+title: Pick your path
+description: Choose where to start with Prysm, depending on whether you want to run a node, stake ETH, or move from another consensus client.
+---
+
+import { LinkCard, CardGrid } from '@site/src/components/ui';
+
+Pick the lane that matches what you want to do. Each one starts with a single page.
+
+<CardGrid>
+	<LinkCard title="Run a node" description="Follow the chain with your own execution client and Prysm beacon node. No ETH needed. Start with the Quickstart." href="/get-started/quickstart/" />
+	<LinkCard title="Stake ETH" description="Run a node first, then add a validator: create keys, deposit 32 ETH and start attesting. Rehearse on Hoodi." href="/get-started/become-a-validator/" />
+	<LinkCard title="Switch from another client" description="Already running Lighthouse, Teku, Nimbus or Lodestar? Move your validators to Prysm without getting slashed." href="/operate/switch-clients/" />
+</CardGrid>
+
+## Not sure?
+
+- **You want to stake but have never run a node.** Start with [Run a node](/get-started/quickstart/). You need a synced node before your validator can do anything.
+- **You want to try without risk.** Do everything on the Hoodi testnet first. See [Try it on Hoodi first](/get-started/try-on-hoodi/).
+- **You want to check your hardware.** See [System requirements](/get-started/system-requirements/).

@@ -1,0 +1,210 @@
+---
+title: Connect your execution client
+description: Create the JWT secret, start Geth, Nethermind, Besu, Erigon, Reth or Ethrex with it, point the Prysm beacon node at it, and check that the two are talking.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Prysm needs an execution client (EL) such as Geth or Nethermind running next to it: the EL checks the transactions in every block. The two connect on port 8551 and prove who they are with a shared secret file, the JWT secret.
+
+## Before you begin
+
+- Prysm installed, with the [folder layout](/get-started/quickstart/) from the Quickstart (`~/ethereum/consensus`, `~/ethereum/execution`). If you run Prysm as a service, use the paths from [Run as a service](/setup/run-as-a-service/) instead.
+- Enough disk for the EL. See [System requirements](/get-started/system-requirements/).
+
+## Connect the two clients
+
+<Steps>
+
+1. **Create the JWT secret.** Do this once. Both clients read the same file.
+
+	```bash
+	cd ~/ethereum/consensus
+	./prysm.sh beacon-chain generate-auth-secret --output-file=../jwt.hex
+	```
+
+	Prysm prints:
+
+	```text
+	INFO jwt: Successfully wrote JSON-RPC authentication secret to file /home/<USER>/ethereum/jwt.hex
+	```
+
+	The file holds 64 hex characters and is readable only by you (`0600`). Any tool that writes 32 random bytes as hex works too, for example `openssl rand -hex 32 | tr -d "\n" > jwt.hex`. Running the command again replaces the secret, so don't: you'd have to restart both clients with the new file.
+
+2. **Install and start your execution client** with the secret. The commands are for Hoodi and keep the EL's data in `~/ethereum/execution`.
+
+	<Tabs syncKey="el">
+	<TabItem label="Geth">
+
+	{/* Verified against Geth v1.17.6 (flags from cmd/utils/flags.go at the v1.17.6 tag, docs at geth.ethereum.org), 2026-09 */}
+
+	Install: see the [Geth installation guide](https://geth.ethereum.org/docs/getting-started/installing-geth). On Ubuntu, `sudo add-apt-repository -y ppa:ethereum/ethereum && sudo apt-get update && sudo apt-get install ethereum`; on macOS, `brew tap ethereum/ethereum && brew install ethereum`.
+
+	```bash
+	geth \
+	  --hoodi \
+	  --datadir=$HOME/ethereum/execution \
+	  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `--mainnet`. The defaults (snap sync, path-based state) are right for a staking node.
+
+	</TabItem>
+	<TabItem label="Nethermind">
+
+	{/* Verified against Nethermind 2.0.0 (docs.nethermind.io, network configs in src/Nethermind/Nethermind.Runner/configs at the 2.0.0 tag), 2026-09 */}
+
+	Install: see the [Nethermind installation guide](https://docs.nethermind.io/get-started/installing-nethermind/). On Ubuntu, `sudo add-apt-repository ppa:nethermindeth/nethermind && sudo apt-get update && sudo apt-get install nethermind`; on macOS, `brew tap nethermindeth/nethermind && brew install nethermind`; on Windows, `winget install --id Nethermind.Nethermind`.
+
+	```bash
+	nethermind \
+	  -c hoodi \
+	  --data-dir $HOME/ethereum/execution \
+	  --jsonrpc-jwtsecretfile $HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `-c mainnet`. The built-in network configuration already enables the Engine API on `127.0.0.1:8551`.
+
+	</TabItem>
+	<TabItem label="Besu">
+
+	{/* Verified against Besu 26.9.0 (options from docs in besu-eth/besu-docs, main branch; Engine API options in app/src/main/java/org/hyperledger/besu/cli/options/EngineRPCOptions.java at 26.9.0), 2026-09 */}
+
+	Install: see the [Besu installation guide](https://docs.besu-eth.org/public-networks/get-started/install/binary-distribution). Besu needs Java 25 or later. On Linux, unpack a release from [GitHub](https://github.com/besu-eth/besu/releases); on macOS, `brew tap besu-eth/besu && brew install besu-eth/besu/besu`.
+
+	```bash
+	besu \
+	  --network=hoodi \
+	  --data-path=$HOME/ethereum/execution \
+	  --engine-jwt-secret=$HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `--network=mainnet`. Besu gives the JVM 25% of RAM by default; its [memory guide](https://docs.besu-eth.org/public-networks/how-to/configure-java/manage-memory) suggests `export BESU_OPTS=-Xmx8g` on machines with 24 GB or more. Besu exits when it runs out of memory, so run it as a [service](/setup/run-as-a-service/) that restarts it.
+
+	</TabItem>
+	<TabItem label="Erigon">
+
+	{/* Verified against Erigon v3.7.0 (flags in cmd/utils/flags.go at the v3.7.0 tag; docs.erigon.tech, which documents v3.6 as latest at time of writing), 2026-09 */}
+
+	Install: see the [Erigon installation guide](https://docs.erigon.tech/get-started/installation). Download the `.deb` or `.tar.gz` from [GitHub releases](https://github.com/erigontech/erigon/releases) and check it against the release's `checksums.txt`.
+
+	```bash
+	erigon \
+	  --chain=hoodi \
+	  --datadir=$HOME/ethereum/execution \
+	  --externalcl \
+	  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `--chain=mainnet`. **Always pass `--externalcl`.** Without it, Erigon runs its own built-in consensus client (Caplin) and you'd have two consensus clients driving one EL.
+
+	</TabItem>
+	<TabItem label="Reth">
+
+	{/* Verified against Reth v2.7.0 (CLI reference at reth.rs/cli/reth/node, log lines in crates/node/events/src/node.rs at the v2.7.0 tag), 2026-09 */}
+
+	Install: see the [Reth installation guide](https://reth.rs/installation/overview). Use a binary from [GitHub releases](https://github.com/paradigmxyz/reth/releases) or `brew install paradigmxyz/brew/reth`. There is no Windows build.
+
+	```bash
+	reth node \
+	  --chain hoodi \
+	  --datadir $HOME/ethereum/execution \
+	  --full \
+	  --authrpc.jwtsecret $HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `--chain mainnet`. **Pass `--full`.** Reth runs an archive node by default, which needs far more disk than a staking node does.
+
+	</TabItem>
+	<TabItem label="Ethrex">
+
+	{/* Verified against Ethrex v27.0.0 (docs/CLI.md, docs/l1/running/*.md and cmd/ethrex/cli.rs at the v27.0.0 tag), 2026-09 */}
+
+	Install: see the [Ethrex installation guide](https://docs.ethrex.xyz/getting-started/index.html). Download `ethrex-linux-x86_64`, `ethrex-linux-aarch64` or `ethrex-macos-aarch64` from [GitHub releases](https://github.com/lambdaclass/ethrex/releases), or `brew install lambdaclass/tap/ethrex`. There is no Windows build, and x86-64 CPUs need AVX2.
+
+	```bash
+	ethrex \
+	  --network hoodi \
+	  --datadir $HOME/ethereum/execution \
+	  --authrpc.jwtsecret $HOME/ethereum/jwt.hex
+	```
+
+	On mainnet, use `--network mainnet`. Ethrex puts the data in a subfolder named after the network (`~/ethereum/execution/hoodi`). It's the newest client on this list with the fewest operators: rehearse on Hoodi and check its [known issues](https://github.com/lambdaclass/ethrex/blob/main/docs/known_issues.md) before using it on mainnet.
+
+	</TabItem>
+	</Tabs>
+
+	Always give the EL an **absolute path** to the secret. Most clients create a new secret when the path doesn't exist, which Prysm then doesn't know.
+
+3. **Start the beacon node** with the same secret, from `~/ethereum/consensus`:
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --hoodi \
+	  --execution-endpoint=http://localhost:8551 \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+	```
+
+	On mainnet, use `--mainnet` and a mainnet [checkpoint sync](/setup/checkpoint-sync/) URL. At startup Prysm logs:
+
+	```text
+	INFO execution: Finished reading JWT secret from ../jwt.hex
+	```
+
+</Steps>
+
+The two flags that matter:
+
+| Flag | Default | What to set |
+| --- | --- | --- |
+| <Flag name="execution-endpoint" /> | `http://localhost:8551` | The EL's Engine API address. Leave the default when the EL runs on the same machine with default ports. |
+| <Flag name="jwt-secret" /> | none | Path to the same JWT secret file the EL uses. |
+
+Other connection flags, such as <Flag name="execution-headers" /> for a proxy that needs extra headers, are in the [beacon-chain reference](/reference/cli/beacon-chain/).
+
+**IPC instead of HTTP.** When both clients run on the same machine, you can pass the EL's IPC socket path instead of a URL, for example `--execution-endpoint=$HOME/ethereum/execution/geth.ipc`. IPC needs no JWT secret. HTTP with JWT is the more common and better-tested setup.
+
+**EL on another machine.** Set `--execution-endpoint=http://<EL_HOST_IP>:8551`, copy the same `jwt.hex` to both machines, make the EL's Engine API listen on its private address (for Geth, `--authrpc.addr` and `--authrpc.vhosts`), and keep both clocks in sync with NTP. Keep the two machines on the same local network.
+
+<Aside type="caution" title="Never expose port 8551 to the internet">
+The JWT secret is the only protection on the Engine API. Allow port 8551 only from the beacon node's address. See the [Security checklist](/security/).
+</Aside>
+
+## Check that it works
+
+1. **Ask the beacon node** whether it reaches the EL:
+
+	```bash
+	curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+	```
+
+	`"el_offline":false` means the connection works. `"is_optimistic":true` means the EL is still syncing; that's normal for the first hours. Once it shows `false`, the EL has caught up.
+
+2. **Watch the beacon node logs.** Once both are synced, Prysm logs a `Synced new block` line for every block. While the EL is still catching up, you see `Called fork choice updated with optimistic block` instead.
+
+## Troubleshooting
+
+**`HTTP authentication to your execution client is not working`, or `401 Unauthorized`.**
+Prysm and the EL read different secrets. Check the EL's startup log for the path it loaded; a line such as Geth's `Generated JWT secret` or Nethermind's `...was not found or was empty, so it has been automatically created` means the path was wrong and the EL made its own. Point both at the same file and restart both. Also check that the clocks are in sync.
+
+**`wanted chain ID 560048, got 1`** (or another pair).
+The two clients are on different networks, here Prysm on Hoodi and the EL on mainnet. Start both with the same network.
+
+**`could not read JWT secret file for authenticating execution API`.**
+Prysm can't read the file, or it doesn't hold exactly 32 bytes of hex. Check the path and permissions.
+
+**The EL logs that no beacon client or consensus client is connected.**
+Prysm isn't running, points at the wrong port, or fails authentication. Check the beacon node logs.
+
+**The beacon node stays optimistic.**
+The EL is still syncing. That can take hours or days. If it never progresses, check the EL's peers and disk speed.
+
+More fixes are in [Fix common problems](/operate/troubleshooting/).
+
+## Next steps
+
+- [Checkpoint sync](/setup/checkpoint-sync/): get the beacon node following the chain in minutes.
+- [Ports, peers and router setup](/setup/networking/): open the P2P ports for both clients.
+- [Run as a service](/setup/run-as-a-service/): keep both clients running across reboots.

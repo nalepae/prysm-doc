@@ -1,0 +1,218 @@
+---
+title: Run from source
+description: Run a beacon node and validator client built from your working tree with bazel run, pass flags and config files, run several nodes side by side, and attach the Delve debugger.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Run the beacon node and validator client straight from your checkout, so every code change is one command away from a running process. This page uses Hoodi; the same commands work with `--mainnet` or `--sepolia`.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/) and check that `bazel build //cmd/beacon-chain` works.
+- A synced or syncing execution client with its Engine API on `http://localhost:8551` and a JWT secret file. See [Connect an execution client](/setup/connect-execution-client/).
+- A checkpoint sync URL for the network, so the node doesn't sync from genesis. See [Checkpoint sync](/setup/checkpoint-sync/).
+
+<Aside type="caution" title="Use a separate data directory">
+Without <Flag name="datadir" />, the beacon node and validator use the default data directory, the same one a normal install uses. Always pass an explicit data directory for development runs so a test build can't migrate or corrupt the database of a node you rely on.
+</Aside>
+
+## Run a beacon node
+
+<Steps>
+
+1. Start the beacon node with `bazel run`. Everything after `--` is passed to the binary.
+
+   ```bash
+   bazel run //cmd/beacon-chain -- \
+     --hoodi \
+     --accept-terms-of-use \
+     --datadir=$HOME/ethereum/consensus/beacon-dev \
+     --execution-endpoint=http://localhost:8551 \
+     --jwt-secret=$HOME/ethereum/jwt.hex \
+     --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+     --genesis-beacon-api-url=https://hoodi.beaconstate.ethstaker.cc
+   ```
+
+   For mainnet, use `--mainnet` and `https://beaconstate.ethstaker.cc`. For Sepolia, use `--sepolia` and `https://checkpoint-sync.sepolia.ethpandaops.io`.
+
+2. Watch the logs. Bazel first builds anything that changed, then the node logs its startup:
+
+   ```text
+   INFO kv: Opening Bolt DB path=…/beacon-dev/beaconchaindata/beaconchain.db
+   INFO httprest: Starting HTTP server address=127.0.0.1:3500
+   ```
+
+3. Stop the node with `Ctrl+C`, change the code, and run the same command again. Bazel rebuilds only the packages you changed.
+
+</Steps>
+
+<Aside type="note" title="Use absolute paths">
+`bazel run` starts the binary inside Bazel's runfiles directory, not in your shell's current directory. Relative paths such as `--datadir=./data` end up somewhere under `bazel-bin`. Use absolute paths or `$HOME`. Prysm expands a leading `~/` itself.
+</Aside>
+
+### Pass flags with a config file
+
+Long flag lists are easier to keep in a YAML file passed with <Flag name="config-file" />. Keys are flag names without the leading dashes:
+
+```yaml title="beacon-dev.yaml"
+hoodi: true
+accept-terms-of-use: true
+datadir: /home/<USER>/ethereum/consensus/beacon-dev
+execution-endpoint: http://localhost:8551
+jwt-secret: /home/<USER>/ethereum/jwt.hex
+verbosity: debug
+```
+
+```bash
+bazel run //cmd/beacon-chain -- --config-file=$HOME/beacon-dev.yaml
+```
+
+Flags on the command line take precedence over the same keys in the file, so you can keep a base file and override one value per run.
+
+### Run the binary without Bazel in the loop
+
+`bazel run` checks the whole build graph on every start. When you restart often without changing code, build once and run the output directly:
+
+```bash
+bazel build //cmd/beacon-chain
+bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain --config-file=$HOME/beacon-dev.yaml
+```
+
+This also frees the Bazel server for other commands, such as running tests in another terminal.
+
+## Run a validator client
+
+Import keys into a development wallet first. `bazel run` works for every subcommand:
+
+```bash
+bazel run //cmd/validator -- accounts import \
+  --hoodi \
+  --accept-terms-of-use \
+  --keys-dir=<PATH_TO_KEYSTORES> \
+  --wallet-dir=$HOME/ethereum/consensus/validator-dev/wallet
+```
+
+Replace `<PATH_TO_KEYSTORES>` with the directory that holds your `keystore-*.json` files. Then start the validator client against your beacon node:
+
+```bash
+bazel run //cmd/validator -- \
+  --hoodi \
+  --accept-terms-of-use \
+  --datadir=$HOME/ethereum/consensus/validator-dev \
+  --wallet-dir=$HOME/ethereum/consensus/validator-dev/wallet \
+  --wallet-password-file=<PASSWORD_FILE> \
+  --suggested-fee-recipient=<FEE_RECIPIENT_ADDRESS>
+```
+
+By default it connects to the beacon node's gRPC API at `127.0.0.1:4000`. To test the REST path instead, add <Flag name="beacon-rest-api-provider" bin="validator" value="http://127.0.0.1:3500" />, which turns on REST mode by itself.
+
+<Aside type="danger" title="Never run development builds with mainnet keys">
+A development build can contain bugs that make a validator sign conflicting messages. Use testnet keys, or keys that aren't active anywhere else, and never run the same keys in two validator clients at once. See [Avoid slashing](/security/avoid-slashing/).
+</Aside>
+
+## Run two nodes side by side
+
+To compare a patched node with an unpatched one on the same machine, give the second node its own data directory and ports:
+
+| What | Flag | Default |
+| --- | --- | --- |
+| Data directory | <Flag name="datadir" /> | Platform default |
+| Beacon API | <Flag name="http-port" /> | `3500` |
+| gRPC API | <Flag name="rpc-port" /> | `4000` |
+| Metrics | <Flag name="monitoring-port" /> | `8080` |
+| P2P TCP | <Flag name="p2p-tcp-port" /> | `13000` |
+| P2P UDP (discovery) | <Flag name="p2p-udp-port" /> | `12000` |
+| P2P QUIC | <Flag name="p2p-quic-port" /> | `13000` |
+
+Each beacon node needs its own execution client, because an execution client serves only one beacon node over the Engine API.
+
+For a network you control completely, with several clients and your own genesis, use a [local devnet](/developers/local-devnet/) instead.
+
+## Attach a debugger
+
+Bazel's `-c dbg` mode builds Go code without optimizations and inlining, which is what [Delve](https://github.com/go-delve/delve) needs to step through code and show variables.
+
+<Steps>
+
+1. Install Delve with the Go version from `go.mod`:
+
+   ```bash
+   go install github.com/go-delve/delve/cmd/dlv@latest
+   ```
+
+2. Build a debug binary:
+
+   ```bash
+   bazel build -c dbg //cmd/beacon-chain
+   ```
+
+3. Start it under Delve. Arguments after `--` go to the beacon node:
+
+   ```bash
+   dlv exec bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain -- \
+     --config-file=$HOME/beacon-dev.yaml
+   ```
+
+4. Set a breakpoint and continue:
+
+   ```text
+   (dlv) break beacon-chain/blockchain/process_block.go:<LINE>
+   (dlv) continue
+   ```
+
+</Steps>
+
+To debug a node that is already running, attach to its process with `dlv attach <PID> bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain`. The binary must be a `-c dbg` build for variables and line numbers to be reliable.
+
+{/* VERIFY: rules_go trims the execroot from source paths in -c dbg builds. Check whether Delve and VS Code need a substitutePath mapping (from the trimmed path to the repository root) for breakpoints to bind, and document the exact mapping. Not verified because a full dbg build was out of scope. */}
+
+In VS Code, use a launch configuration in `exec` mode that points at the Bazel output, and build it with `bazel build -c dbg` before you start the session:
+
+```json title=".vscode/launch.json"
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "beacon-chain (Bazel dbg build)",
+      "type": "go",
+      "request": "launch",
+      "mode": "exec",
+      "program": "${workspaceFolder}/bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain",
+      "args": ["--config-file=${env:HOME}/beacon-dev.yaml"]
+    }
+  ]
+}
+```
+
+<Aside type="tip">
+Stopping at a breakpoint pauses the whole node. After a few seconds, peers see it as unresponsive and the node falls behind the chain. For timing-sensitive code, use logs, [pprof or tracing](/developers/debugging/) instead of breakpoints.
+</Aside>
+
+## Check that it works
+
+Ask the beacon node for its version and sync status:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/node/version
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+The version starts with `Prysm/`, and `is_syncing` turns `false` once the node has caught up.
+
+## Troubleshooting
+
+**Files end up under `bazel-bin`, or the node can't find a file you passed.** You passed a relative path. Use an absolute path for <Flag name="datadir" />, <Flag name="jwt-secret" /> and every other file flag.
+
+**`Another command is running` when you start a second Bazel command.** The first `bazel run` still holds the Bazel server while it builds. Wait for the binary to start, or run the binary directly from `bazel-bin` as shown above.
+
+**The node exits with `address already in use`.** Another beacon node, possibly an installed one, uses the same port. Change the ports as shown in [Run two nodes side by side](#run-two-nodes-side-by-side).
+
+**Breakpoints are never hit, or variables show as optimized away.** The binary wasn't built with `-c dbg`. Rebuild with `bazel build -c dbg //cmd/beacon-chain` and restart the debugger.
+
+## Next steps
+
+- [Debugging and profiling](/developers/debugging/)
+- [Run a local devnet](/developers/local-devnet/)
+- [Unit tests](/developers/unit-tests/)

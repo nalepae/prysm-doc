@@ -1,0 +1,87 @@
+.arch {
+	margin: 1.5rem 0;
+	padding: 1rem;
+	border: 1px solid var(--site-color-gray-5);
+	border-radius: 1rem;
+	background: var(--site-color-bg-nav);
+	overflow-x: auto;
+}
+.arch svg {
+	width: 100%;
+	min-width: 36rem;
+	height: auto;
+	display: block;
+}
+.arch text {
+	font-family: var(--site-font);
+	text-anchor: middle;
+	fill: var(--site-color-gray-2);
+	font-size: 14px;
+}
+.arch .a-net rect {
+	fill: none;
+	stroke: var(--site-color-gray-4);
+	stroke-dasharray: 4 5;
+}
+.arch .a-box rect {
+	fill: var(--site-color-bg);
+	stroke: var(--site-color-gray-4);
+	stroke-width: 1.5;
+}
+.arch .a-prysm rect {
+	stroke: var(--site-color-accent);
+	fill: color-mix(in srgb, var(--site-color-accent) 10%, var(--site-color-bg));
+}
+.arch .a-stack rect {
+	opacity: 0.55;
+}
+.arch .a-optional rect {
+	stroke-dasharray: 6 4;
+}
+.arch .a-title {
+	font-family: var(--prysm-display);
+	font-weight: 650;
+	font-size: 17px;
+	fill: var(--site-color-white);
+}
+.arch .a-sub {
+	font-size: 12.5px;
+	fill: var(--site-color-gray-3);
+}
+.arch .a-small {
+	font-size: 12px;
+	fill: var(--site-color-gray-2);
+}
+.arch .a-link line,
+.arch .a-link path {
+	stroke: var(--site-color-gray-3);
+	stroke-width: 1.5;
+}
+.arch .a-accent line {
+	stroke: var(--site-color-accent);
+}
+.arch .a-dashed line,
+.arch .a-dashed path {
+	stroke-dasharray: 5 4;
+}
+.arch .a-arrowhead {
+	fill: var(--site-color-gray-3);
+}
+.arch .a-label {
+	font-size: 12.5px;
+	fill: var(--site-color-white);
+}
+.arch .a-strong {
+	font-weight: 650;
+	font-size: 13.5px;
+}
+.arch .a-muted {
+	fill: var(--site-color-gray-3);
+	font-size: 12px;
+}
+.arch .a-left {
+	text-anchor: start;
+}
+.arch .a-right {
+	text-anchor: end;
+}

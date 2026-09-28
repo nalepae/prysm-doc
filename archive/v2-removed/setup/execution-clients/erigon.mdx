@@ -1,0 +1,176 @@
+---
+title: Erigon
+description: Install and configure Erigon with its built-in consensus layer disabled as the execution client for a Prysm beacon node on Hoodi, mainnet or Sepolia.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Erigon](https://docs.erigon.tech/) is the execution client written in Go and maintained by Erigon Technologies. It focuses on storage efficiency: it syncs mostly by downloading snapshot files over BitTorrent and keeps a compact database, with several pruning modes to choose from.
+
+Erigon 3 ships with its own consensus layer, **Caplin**, enabled by default. To use Prysm as the consensus client instead, you must start Erigon with `--externalcl`.
+
+{/* Verified against Erigon v3.7.0 (flags in cmd/utils/flags.go at the v3.7.0 tag; docs.erigon.tech, which documents v3.6 as latest at time of writing), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://docs.erigon.tech/get-started/installation). The most common method is a pre-built release: download the `.deb` package or `.tar.gz` archive for your platform from [GitHub releases](https://github.com/erigontech/erigon/releases), and verify it against the `checksums.txt` file published with each release. The Docker image is `erigontech/erigon`.
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Erigon's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+erigon \
+  --chain=hoodi \
+  --datadir=$HOME/ethereum/execution \
+  --externalcl \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http.api=eth,erigon,net,web3
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+erigon \
+  --chain=mainnet \
+  --datadir=$HOME/ethereum/execution \
+  --externalcl \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http.api=eth,erigon,net,web3
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+erigon \
+  --chain=sepolia \
+  --datadir=$HOME/ethereum/execution \
+  --externalcl \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http.api=eth,erigon,net,web3
+```
+
+</TabItem>
+</Tabs>
+
+`--externalcl` turns off Caplin and waits for an external consensus client on the Engine API. `--authrpc.addr` and `--authrpc.port` show the defaults. Erigon's JSON-RPC server is on by default at `localhost:8545`; `--http.api` chooses its namespaces. If you run the unpacked binary from the `execution` folder, call `./erigon`.
+
+<Aside type="caution" title="Don't run Caplin and Prysm together">
+Without `--externalcl`, Erigon runs Caplin as its consensus layer. You'd be running two consensus clients against one execution client, which Prysm doesn't support. Always pass `--externalcl` when you pair Erigon with Prysm.
+</Aside>
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--port`) | Yes, for more peers |
+| 42069 | TCP and UDP | Snapshot download over BitTorrent (`--torrent.port`) | Yes |
+| 8551 | TCP | Engine API (`--authrpc.port`) | No |
+| 8545 | TCP | JSON-RPC (`--http.port`) | No |
+| 9090 | TCP | Internal gRPC API (`--private.api.addr`) | No |
+| 6061 | TCP | Metrics, with `--metrics` (`--metrics.port`) | No |
+
+### Storage
+
+`--prune.mode` picks how much history Erigon keeps. Changing it later means deleting the `chaindata` folder and resyncing, so decide up front.
+
+| Mode | Keeps | Use it for |
+| --- | --- | --- |
+| `full` (default) | State and blocks for the last 262,144 blocks (about 36 days) | Most staking nodes |
+| `minimal` | State and blocks for the last 100,000 blocks (about 14 days) | Solo staking on constrained hardware |
+| `blocks` | All blocks, plus recent state | Indexing and research |
+| `archive` | Everything | Archive RPC |
+
+Erigon's [hardware requirements](https://docs.erigon.tech/get-started/hardware-requirements) measured a mainnet `full` node at 419 GB on 2026-07-19 (with its default Erigon plus Caplin setup) and recommend a 2 TB disk. See [Pruning modes](https://docs.erigon.tech/fundamentals/pruning-modes) for details.
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. Erigon needs a head to sync towards, so it only starts syncing once Prysm is running; checkpoint sync gets Prysm there in minutes. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+Once Prysm is connected, Erigon logs every payload it receives:
+
+```text
+[INFO] [..] [NewPayload] Handling new payload height=... hash=0x...
+```
+
+Ask Erigon whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Erigon is synced.
+
+## Troubleshooting
+
+**`flag --externalcl was provided, but no CL requests to engine-api in ...`.**
+Erigon is waiting for Prysm. Check that the beacon node is running, points at port 8551, and shows no authentication errors.
+
+**Prysm reports `401 Unauthorized`.**
+The secrets differ. Without `--authrpc.jwtsecret`, Erigon creates its own at `<datadir>/jwt.hex`. Either pass your shared file to Erigon, or point Prysm's <Flag name="jwt-secret" /> at Erigon's file.
+
+**Erigon logs Caplin activity.**
+Caplin is running because `--externalcl` is missing. Stop Erigon, add the flag, and start it again.
+
+**Prysm on another host can't connect.**
+Set `--authrpc.addr` to the host's private LAN address (Erigon's docs advise against `0.0.0.0`) and list the host name Prysm uses in `--authrpc.vhosts`. Keep port 8551 closed to the internet.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

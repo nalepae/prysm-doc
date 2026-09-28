@@ -1,0 +1,123 @@
+---
+title: "Avoid slashing"
+description: "The rules that keep your validators from being slashed, doppelganger protection, moving your slashing protection history, and running a slasher."
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Honest operators get slashed for one reason: **the same validator key signed from two places**. A slashed validator is forced out of the network, loses part of its balance, and waits about 36 days before it can withdraw the rest. Prysm stops one validator client from contradicting itself, but it can't see what another copy of your key is doing. This page is about never creating that second copy.
+
+:::danger[The two rules]
+1. **Never run the same keys in two places**, not even briefly, not as a "backup" or "failover". There is no safe overlap.
+2. **When you move keys, stop the old setup for good and wait** at least two epochs (about 13 minutes) before starting the new one.
+:::
+
+Being offline is **not** slashable. It costs small penalties, but a few hours of downtime during a migration is far cheaper than a slashing.
+
+## How people get slashed
+
+- Starting the new machine while the old one still runs, or the old one restarting after a reboot because its service was still enabled.
+- Two validator clients with the same keys for "redundancy", or a watchdog that starts a standby when it thinks the primary is down.
+- Restoring a VM snapshot or backup while the original still runs.
+- Importing the same keys into Prysm and another client during a client switch.
+- Using keys from a staking service that still runs them.
+
+## Move keys safely
+
+The full procedure is in [Move to a new machine](/operate/move-to-new-machine/). The safety-critical steps are:
+
+<Steps>
+
+1. **Stop the old validator client and disable its service** so it can't come back (`sudo systemctl disable --now validator`, or remove the container's restart policy).
+
+2. **Remove the keys** from the old machine, or make them unreadable.
+
+3. **Export the slashing protection history** from the old machine (below) and import it on the new one.
+
+4. **Wait** at least two epochs after the old client stopped. On a block explorer, check that your validators are missing attestations.
+
+5. **Start the new validator client** with doppelganger protection on (below).
+
+</Steps>
+
+## Turn on doppelganger protection
+
+Add <Flag name="enable-doppelganger" bin="validator" /> to your validator client. It's off by default; turn it on unless you have a reason not to.
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --wallet-dir=./wallet \
+  --wallet-password-file=./wallet-password.txt \
+  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+  --enable-doppelganger
+```
+
+At startup, the validator checks whether your keys were active on the network in the last few epochs. If they were, it refuses to start:
+
+```text
+Duplicate instances exists in the network for validator keys: <PUBKEYS>
+```
+
+Keys you add while it runs are held out of duties for at least two epochs and checked first.
+
+Doppelganger protection is a last line of defense, not a permission to run two copies. It can't catch a copy that was offline during the check and comes online later.
+
+## Move your slashing protection history
+
+The validator client records every block and attestation it signs, and refuses to sign anything that conflicts. Take that history with you when you move keys to another machine or client. Every client reads the standard [EIP-3076](https://eips.ethereum.org/EIPS/eip-3076) format.
+
+Stop the validator client first; its database is locked while it runs.
+
+**Export** on the old machine:
+
+```bash
+./prysm.sh validator slashing-protection-history export \
+  --hoodi \
+  --datadir=<VALIDATOR_DATADIR> \
+  --slashing-protection-export-dir=<EXPORT_DIR>
+```
+
+```text
+INFO slashing-protection: Successfully wrote <EXPORT_DIR>/slashing_protection.json. You can import this file using Prysm's validator slashing-protection-history import command in another machine
+```
+
+**Import** on the new machine, before its validator starts:
+
+```bash
+./prysm.sh validator slashing-protection-history import \
+  --hoodi \
+  --datadir=<VALIDATOR_DATADIR> \
+  --slashing-protection-json-file=<PATH_TO>/slashing_protection.json
+```
+
+```text
+INFO slashing-protection: Slashing protection JSON successfully imported into <VALIDATOR_DATADIR>
+```
+
+`<VALIDATOR_DATADIR>` is the validator's <Flag name="datadir" bin="validator" />, the folder with `validator.db` (the validator logs it at startup as `Checking DB databasePath=...`). If the export says `No slashing protection data was found in your database`, you pointed it at the wrong folder; older setups keep the database in `<WALLET_DIR>/direct/`.
+
+The file holds no secrets. The history only protects you if the old validator never signs again. If you lost it, rely on the waiting step: keep the old client off for several epochs, then start with <Flag name="enable-doppelganger" bin="validator" />.
+
+## Run a slasher (optional)
+
+A slasher watches the network for slashable messages from **any** validator so they can be punished. It doesn't protect your own validators, rarely earns anything, and needs a lot of extra disk, memory and disk I/O, so home stakers are usually better off without it. See [Run a slasher](/operate/slasher/).
+
+## Check that it works
+
+- Doppelganger protection: the validator starts without the `Duplicate instances` error and begins attesting after the check.
+- History import: the import ends with `Slashing protection JSON successfully imported`.
+- Only one machine runs your keys: stop the validator and confirm on a block explorer that attestations stop.
+
+## Troubleshooting
+
+**`slashing protection JSON metadata was incorrect`** The file comes from another network. Check `--hoodi` or `--mainnet`.
+
+**The validator won't start: `Duplicate instances exists in the network`.** Another copy of these keys signed recently. Find and stop it before doing anything else. If you just stopped the old machine, wait a few more epochs.
+
+## Next steps
+
+- [Move to a new machine](/operate/move-to-new-machine/)
+- [Switch clients](/operate/switch-clients/)
+- [How staking works](/learn/how-staking-works/)

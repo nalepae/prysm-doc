@@ -1,0 +1,172 @@
+---
+title: "Set your fee recipient"
+description: "Choose the address that receives transaction fees from the blocks your validators propose, for all validators or per validator with a proposer settings file."
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+When your validator proposes a block, the transaction tips in it, and any MEV payment, go to an Ethereum address you choose: the **fee recipient**. If you don't set one, they go to the zero address and are lost for good.
+
+:::danger[Set it before your first proposal]
+Without a fee recipient, every block your validator proposes pays its fees to `0x0000000000000000000000000000000000000000`. Nobody can recover them.
+:::
+
+## Before you begin
+
+- Have an Ethereum address you control, for example from a hardware wallet. It can be your withdrawal address or another one, and it doesn't need any ETH.
+- [Import your keys](/validators/import-keys/).
+
+## Set one address for all validators
+
+<Steps>
+
+1. **Add <Flag name="suggested-fee-recipient" bin="validator" /> to the validator client:**
+
+   ```bash
+   ./prysm.sh validator \
+     --hoodi \
+     --wallet-dir=./wallet \
+     --wallet-password-file=./wallet-password.txt \
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+   Copy the address from your wallet, in its mixed-case (checksummed) form. An all-lowercase address works but logs a warning, because the checksum catches typos.
+
+2. **Add the same flag to the beacon node** as a safety net. It applies only when the validator client sends no address:
+
+   ```bash
+   ./prysm.sh beacon-chain \
+     --hoodi \
+     --execution-endpoint=http://localhost:8551 \
+     --jwt-secret=../jwt.hex \
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+3. **Restart both** and check the validator log:
+
+   ```text
+   INFO loader: Proposer settings loaded from default suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+</Steps>
+
+## Set an address per validator
+
+A **proposer settings file** gives each validator key its own fee recipient, and optionally its own graffiti and MEV-Boost setting. Keys you don't list use `default_config`. Prysm reads YAML or JSON.
+
+<Tabs syncKey="format">
+<TabItem label="YAML">
+
+```yaml title="proposer-settings.yaml"
+proposer_config:
+  '<VALIDATOR_PUBKEY_1>':
+    fee_recipient: '<FEE_RECIPIENT_1>'
+    graffiti: 'validator one'
+  '<VALIDATOR_PUBKEY_2>':
+    fee_recipient: '<FEE_RECIPIENT_2>'
+    builder:
+      enabled: false
+default_config:
+  fee_recipient: '<DEFAULT_FEE_RECIPIENT>'
+  builder:
+    enabled: true
+    gas_limit: 60000000
+```
+
+</TabItem>
+<TabItem label="JSON">
+
+```json title="proposer-settings.json"
+{
+  "proposer_config": {
+    "<VALIDATOR_PUBKEY_1>": {
+      "fee_recipient": "<FEE_RECIPIENT_1>",
+      "graffiti": "validator one"
+    },
+    "<VALIDATOR_PUBKEY_2>": {
+      "fee_recipient": "<FEE_RECIPIENT_2>",
+      "builder": { "enabled": false }
+    }
+  },
+  "default_config": {
+    "fee_recipient": "<DEFAULT_FEE_RECIPIENT>",
+    "builder": { "enabled": true, "gas_limit": 60000000 }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Replace `<VALIDATOR_PUBKEY_…>` with your validators' public keys (`0x` followed by 96 hex characters, as shown by `accounts list`) and the `<…FEE_RECIPIENT…>` placeholders with Ethereum addresses.
+
+| Field | Meaning |
+| --- | --- |
+| `fee_recipient` | Address that receives the fees. A listed key without one uses the default. |
+| `graffiti` | Text in the blocks this key proposes. See [Set graffiti](/validators/graffiti/). |
+| `builder.enabled` | Use [MEV-Boost](/validators/mev-boost/) for this key. |
+| `builder.gas_limit` | Gas limit asked of builders. Leave it at `60000000` unless you have a reason. |
+
+Start the validator with <Flag name="proposer-settings-file" bin="validator" />:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --wallet-dir=./wallet \
+  --wallet-password-file=./wallet-password.txt \
+  --proposer-settings-file=./proposer-settings.yaml
+```
+
+```text
+INFO loader: Proposer settings loaded from file proposer-settings-file=./proposer-settings.yaml
+```
+
+Prysm rejects unknown fields, so a typo such as `fee_recipent` stops the validator at startup instead of being ignored. Prysm reads the file only at startup: restart the validator after editing it.
+
+To manage many validator clients from one place, <Flag name="proposer-settings-url" bin="validator" /> loads the same structure as JSON from a URL instead. You can't use both.
+
+:::caution[The file wins over API changes]
+You can also change a key's fee recipient while the validator runs, with the [Keymanager API](/validators/keymanager/). But if your settings file has a `proposer_config` section, it replaces those changes at the next restart. Manage per-key settings in one place.
+:::
+
+## Which address is used
+
+For each key, Prysm uses the first of these that is set:
+
+1. The key's entry in `proposer_config` (or a value set through the Keymanager API).
+2. `default_config` in the settings file.
+3. <Flag name="suggested-fee-recipient" bin="validator" /> on the validator client.
+4. <Flag name="suggested-fee-recipient" /> on the beacon node.
+
+## Check that it works
+
+- **Validator log at startup:** `Proposer settings loaded from default`, `... from file`, `... from URL` or `... from the DB`. A `Fee recipient is burn address` warning means a key is set to the zero address.
+- **No setting at all:** the validator warns `Validator client started without proposer settings such as fee recipient and will continue to use settings provided in the beacon node`.
+- **Per key, while running:** with the [Keymanager API](/validators/keymanager/) enabled, print every key's fee recipient:
+
+  ```bash
+  prysmctl validator proposer-settings \
+    --token=$(cat <PATH_TO_AUTH_TOKEN>) \
+    --validator-host=http://127.0.0.1:7500
+  ```
+
+  It prints `Validator: <PUBKEY>. Fee-recipient: <ADDRESS>` for each key.
+
+- **After a proposal:** open the block on a block explorer. With MEV-Boost, the block's fee recipient is often the builder, and your payment is the last transaction in the block, sent to your address.
+
+## Troubleshooting
+
+**`--suggested-fee-recipient is not a valid Ethereum address`** Copy the address again from your wallet, including `0x`.
+
+**`unknown field` or `failed to unmarshal yaml file`** A field name is misspelled or the file has a syntax error.
+
+**`cannot specify both --proposer-settings-file and --proposer-settings-url`** Use one of them.
+
+**A fee recipient set through the API is back to the old value after a restart.** Your settings file has a `proposer_config` section. Update the file instead.
+
+## Next steps
+
+- [Use MEV-Boost](/validators/mev-boost/)
+- [Set graffiti](/validators/graffiti/)
+- [validator flags](/reference/cli/validator/)

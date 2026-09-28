@@ -1,0 +1,99 @@
+---
+title: Protect your keys
+description: How to handle your mnemonic, withdrawal credentials, validator keystores and passwords, and what an attacker can do with each one.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A validator involves three secrets with very different power: the **mnemonic**, the **withdrawal address key**, and the **validator signing keys**. Protect them in that order. Only the signing keys ever belong on the staking machine. For how the keys relate, see [Keys and withdrawal credentials](/learn/keys-and-withdrawals/).
+
+## What each secret lets an attacker do
+
+| If an attacker gets… | They can | They can't |
+| --- | --- | --- |
+| **Mnemonic**, withdrawal credentials still `0x00` | Change your withdrawal credentials to their own address, then exit and take the full balance. Derive every signing key. | Nothing stops them. Treat this as a total loss unless you get your own credential change included first. |
+| **Mnemonic**, credentials already `0x01`/`0x02` | Derive every signing key: get you slashed, or sign voluntary exits. | Change the withdrawal address or receive your funds. |
+| **Withdrawal address private key** | Trigger exits and partial withdrawals from the execution layer ([EIP-7002](https://eips.ethereum.org/EIPS/eip-7002)), and spend everything that arrives at the address. | Sign attestations or blocks. |
+| **One validator signing key** | Sign conflicting messages to get that validator slashed, or sign a voluntary exit. | Redirect the balance: it still goes to your withdrawal address. |
+| **Keystore file without its password** | Brute-force the password offline. Weak passwords fall quickly. | Anything else, if the password is strong. |
+
+The mnemonic is the root of everything. A leaked signing key is serious but bounded: the attacker can hurt that validator, not steal from it.
+
+## The mnemonic
+
+Your mnemonic (the 24 words from your key generation tool) derives both the signing keys and, for `0x00` credentials, the withdrawal key.
+
+- **Generate it offline.** Run the key generation tool (for example [ethstaker-deposit-cli](https://github.com/eth-educators/ethstaker-deposit-cli)) on a machine disconnected from the network, ideally a freshly installed or live-booted OS that will not go back online. Copy only the keystores and `deposit_data` file off it.
+- **Write it down, don't store it digitally.** Paper or a metal backup, kept somewhere protected from fire and flood. No photos, cloud notes, password-manager entries or email drafts.
+- **Never type it on a networked machine.** That includes "recovery" and "import" screens in wallets, websites and support chats. No legitimate process asks for your mnemonic online.
+- **Don't generate or recover keys with Prysm on your staking host.** `validator wallet create` with a derived (HD) wallet shows a new mnemonic on the validator machine, and `validator wallet recover` needs the mnemonic typed or stored there (<Flag name="mnemonic-file" bin="validator" />). Generate keys offline and [import the keystores](/validators/import-keys/) instead.
+- **Consider a passphrase (25th word)** only if you have a reliable way to store it separately. A forgotten passphrase is as bad as a lost mnemonic.
+- **Plan for inheritance.** Someone you trust should be able to find and use the backup if you can't.
+
+## Withdrawal credentials are your most important control
+
+Withdrawal credentials decide where your stake goes when it leaves the validator. Get them right and a compromise of your staking machine can't steal your ETH.
+
+- **`0x00` (BLS):** controlled by a withdrawal key derived from the mnemonic. Anyone with the mnemonic can change them once, to any address.
+- **`0x01` (execution address):** a fixed Ethereum address. Rewards above 32 ETH are swept there automatically.
+- **`0x02` (compounding):** a fixed address, with a maximum effective balance of 2048 ETH so rewards compound.
+
+Once set to `0x01` or `0x02`, the address can't be changed. (`0x01` can be upgraded to `0x02` with a consolidation request sent from the same address; the address stays the same.)
+
+What to do:
+
+1. **Choose an address whose key you control and that never touches the staking machine**: a hardware wallet, or a multisig for larger stakes. Not an exchange deposit address.
+2. **Set it at key generation time** (the deposit tool's withdrawal address option), so the validator never has `0x00` credentials.
+3. **Check it independently after the deposit.** Look up your validator on a [block explorer](/resources/block-explorers/) and confirm the withdrawal credentials end in your address. Do this before you deposit anything beyond the first validator.
+4. **If you have `0x00` credentials, change them now.** See [Withdrawals](/validators/withdrawals/). Until you do, your mnemonic alone controls your funds.
+
+<Aside type="danger" title="Check the address character by character">
+Clipboard-replacing malware and look-alike addresses are common. Compare the full address in the deposit file and on the block explorer against the address on your hardware wallet's screen. A wrong address can't be changed later.
+</Aside>
+
+## Validator keystores and passwords
+
+The keystores (`keystore-m_12381_3600_*.json`, [EIP-2335](https://eips.ethereum.org/EIPS/eip-2335)) hold your signing keys, encrypted with a password. When you import them, Prysm re-encrypts them into a single wallet file, `<wallet-dir>/direct/accounts/all-accounts.keystore.json`, protected by the wallet password.
+
+- **Use strong, unique passwords** for keystores and the wallet. The encryption is only as good as the password, and an attacker who copies the file can try passwords offline.
+- **Password files are plaintext.** Running unattended requires <Flag name="wallet-password-file" bin="validator" />, so the password sits on disk next to the wallet. That's the normal tradeoff; limit who can read both:
+
+  ```bash
+  sudo chown validator:validator /var/lib/ethereum/validator/wallet-password.txt
+  sudo chmod 600 /var/lib/ethereum/validator/wallet-password.txt
+  sudo chmod 700 /var/lib/ethereum/validator
+  ```
+
+  If a file named `walletpassword.txt` exists in the wallet directory, Prysm uses it automatically and refuses to start unless its mode is exactly `0600`.
+- **Delete the original keystores and any temporary password files** from the staking machine after import. Keep the originals only in your offline backup.
+- **Never print private keys.** `validator accounts list` has a <Flag name="show-private-keys" bin="validator" /> option; don't use it on a machine whose terminal output is logged or shared.
+- **Back up the wallet encrypted.** A wallet backup plus its password file is the same as your signing keys in plaintext. See [Back up and restore](/operate/backup-and-restore/).
+
+## If a key leaks
+
+- **Signing key leaked:** exit the affected validators as soon as possible (with your own signed exit, or from your withdrawal address). The validator stays slashable until it becomes withdrawable, so a fast exit shortens the window. Your funds still go to your withdrawal address. See [Exit a validator](/validators/exit/).
+- **Mnemonic leaked, `0x01`/`0x02` credentials:** treat every signing key as leaked, and exit all validators from that mnemonic.
+- **Mnemonic leaked, `0x00` credentials:** submit a credential change to an address you control immediately; the first valid change included on chain wins. Then exit.
+
+## Remote signers and HSMs
+
+A remote signer such as [Web3Signer](https://docs.web3signer.consensys.io/) keeps signing keys out of the validator client. The validator asks the signer to sign each message over HTTP; the keys can live in a vault, a cloud KMS, or an HSM.
+
+What it helps with:
+
+- A compromised validator host can request signatures but can't copy the keys.
+- Web3Signer keeps its own slashing protection database (PostgreSQL), a second check independent of Prysm's.
+
+What it doesn't:
+
+- An attacker controlling the validator host can still ask the signer to sign what it wants, within the signer's slashing protection rules.
+- It adds a service to secure, monitor and keep available.
+
+Connect Prysm with <Flag name="validators-external-signer-url" bin="validator" />. Prysm talks to the signer over plain HTTP or HTTPS and has no option for a client certificate, so keep the signer on a private network or host and restrict who can reach it. See [Validator with a remote signer](/setup/topologies/remote-signer/) and [Remote signer flags](/flags/remote-signer/).
+
+## Next steps
+
+- [Avoid slashing](/security/avoid-slashing/)
+- [Import keys into Prysm](/validators/import-keys/)
+- [Withdrawals](/validators/withdrawals/)

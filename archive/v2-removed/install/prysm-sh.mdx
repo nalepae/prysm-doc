@@ -1,0 +1,193 @@
+---
+title: Install with prysm.sh on Linux and macOS
+description: Use the prysm.sh launcher to download, verify and run the Prysm beacon node, validator, prysmctl and client-stats on Linux and macOS.
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+`prysm.sh` is a small Bash script that stands in for the Prysm binaries. Each time you run it, it works out which release to use, downloads that release's binary if it isn't already on disk, verifies its checksum and GPG signature, and then replaces itself with the real program. You get verified binaries and updates on restart without managing files yourself.
+
+Use it when you run Prysm from a terminal. For services that should only change when you say so, prefer the [release binaries](/install/binaries/) with [systemd](/setup/systemd/).
+
+## Before you begin
+
+- A 64-bit Linux (x86-64 or ARM64) or macOS (Intel or Apple silicon) machine. 32-bit ARM (`armv7l`) is rejected.
+- `bash`, `curl`, and either `shasum` or `sha256sum`. These come with macOS and most Linux distributions.
+- `gpg`, to check signatures. Most Linux distributions include it (`sudo apt install gnupg` on Debian and Ubuntu if not). On macOS, install it with `brew install gnupg` or [GnuPG for macOS](https://gnupg.org/download/).
+- An internet connection when you start Prysm, unless you pin a version (see [Pin a release](#pin-a-release)).
+
+## Install the script
+
+<Steps>
+
+1. Create the folder layout used across these docs and move into `consensus`:
+
+   ```bash
+   mkdir -p ~/ethereum/consensus ~/ethereum/execution
+   cd ~/ethereum/consensus
+   ```
+
+2. Download the script and make it executable:
+
+   ```bash
+   curl https://raw.githubusercontent.com/OffchainLabs/prysm/master/prysm.sh --output prysm.sh
+   chmod +x prysm.sh
+   ```
+
+3. Download and verify the beacon node without starting it:
+
+   ```bash
+   ./prysm.sh beacon-chain --download-only
+   ```
+
+   The script prints each stage. On a Linux x86-64 machine the output looks like this (the GPG lines come from `gpg` itself):
+
+   ```text
+   Latest Prysm version is v7.2.0.
+   Downloading beacon chain@v7.2.0 to /home/<USER>/ethereum/consensus/dist/beacon-chain-v7.2.0-linux-amd64 (automatically selected latest available version)
+   Verifying binary integrity.
+   beacon-chain-v7.2.0-linux-amd64: OK
+   gpg: Signature made ...
+   gpg:                using RSA key 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   gpg: Good signature from "Preston Van Loon <preston@pvl.dev>" [unknown]
+   ...
+   Primary key fingerprint: 0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+   Verified /home/<USER>/ethereum/consensus/dist/beacon-chain-v7.2.0-linux-amd64 has been signed by Prysmatic Labs.
+   Only download operation is requested, done.
+   ```
+
+   gpg also prints `WARNING: This key is not certified with a trusted signature!`. That's expected: it means you haven't personally signed the Prysm key. What matters is the `Good signature` line and the fingerprint. See [Check the signing key](#check-the-signing-key).
+
+</Steps>
+
+## Run Prysm through the script
+
+Pass the program name first, then its flags, exactly as you would to the binary:
+
+```bash
+./prysm.sh beacon-chain --hoodi --jwt-secret=../jwt.hex --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+./prysm.sh validator --hoodi --wallet-dir=$HOME/ethereum/consensus
+./prysm.sh prysmctl checkpoint-sync download --beacon-node-host=http://localhost:3500
+./prysm.sh client-stats --help
+```
+
+Swap `--hoodi` for `--mainnet` on mainnet. The four programs the script knows about are `beacon-chain`, `validator`, `prysmctl` and `client-stats`. Anything else, including the old `slasher`, exits with an error; the slasher is now part of the beacon node (<Flag name="slasher" />).
+
+The script ends with `exec`, so the Prysm program replaces the shell process. Signals such as Ctrl-C go straight to Prysm, which shuts down cleanly.
+
+The first time you start the beacon node or validator, Prysm asks you to accept its terms of use. Type `accept`, or pass <Flag name="accept-terms-of-use" /> in non-interactive environments. Prysm then writes an empty `tosaccepted` file in its data directory and doesn't ask again.
+
+## What the script does
+
+On every run, `prysm.sh`:
+
+1. **Picks a version.** If `USE_PRYSM_VERSION` is set, it uses that. Otherwise it fetches the latest release tag from `https://prysmaticlabs.com/releases/latest`. If that request fails, the script stops and tells you it needs an internet connection.
+2. **Picks a build for your machine.** It maps `uname` to an asset name: `linux` or `darwin`, and `amd64` (from `x86_64`) or `arm64` (from `aarch64` or `arm64`). For example, `beacon-chain-v7.2.0-darwin-arm64` on an Apple silicon Mac.
+3. **Downloads if needed.** If `dist/<program>-<version>-<os>-<arch>` doesn't exist yet, it downloads it, with its `.sha256` and `.sig` files, from `https://prysmaticlabs.com/releases/`. These are the same files as the assets on the [GitHub release](https://github.com/OffchainLabs/prysm/releases). If the binary already exists, it prints `Beacon chain is up to date.` (or the equivalent for the program you ran).
+4. **Verifies the binary, every time.** It checks the SHA-256 checksum, imports the Prysm signing key into your GPG keyring if it isn't there yet, and checks the signature. If either check fails, it stops with `Failed to verify Prysm binary.`
+5. **Starts the program** with the rest of your arguments.
+
+### Where files go
+
+Binaries are stored in a `dist` folder next to the script (symlinks to the script are followed):
+
+```text
+~/ethereum/consensus/
+├── prysm.sh
+└── dist/
+    ├── beacon-chain-v7.2.0-linux-amd64
+    ├── beacon-chain-v7.2.0-linux-amd64.sha256
+    ├── beacon-chain-v7.2.0-linux-amd64.sig
+    ├── validator-v7.2.0-linux-amd64
+    ├── validator-v7.2.0-linux-amd64.sha256
+    └── validator-v7.2.0-linux-amd64.sig
+```
+
+Old versions stay in `dist` after an update. Delete them once you're happy with the new release.
+
+The script doesn't choose where Prysm keeps its data. That's up to <Flag name="datadir" /> and <Flag name="wallet-dir" bin="validator" />; without them, Prysm uses `~/.eth2` on Linux and `~/Library/Eth2` on macOS.
+
+## Environment variables
+
+The script reads these variables and nothing else:
+
+| Variable | Effect |
+| --- | --- |
+| `USE_PRYSM_VERSION` | Use this release tag (for example `v7.2.0`) instead of the latest. Also skips the online "latest version" lookup. |
+| `USE_PRYSM_MODERN` | Set to `true` to run the `modern` beacon node build. Only published for Linux amd64; on other platforms the download fails. Affects `beacon-chain` only. See [Modern and portable builds](/install/binaries/#modern-and-portable-builds). |
+| `PRYSM_ALLOW_UNVERIFIED_BINARIES` | Set to `1` to skip **all** verification, checksum and signature. Only for troubleshooting; never on a validator. |
+
+Set a variable for one command, or export it for the whole shell session:
+
+```bash
+USE_PRYSM_VERSION=v7.2.0 ./prysm.sh beacon-chain --hoodi
+# or
+export USE_PRYSM_VERSION=v7.2.0
+```
+
+### Pin a release
+
+Without `USE_PRYSM_VERSION`, every restart can bring in a new release, including one you haven't read the notes for. To control when you update, pin the version and change it on purpose. See [Update and roll back](/install/update/).
+
+With a pinned version whose binary is already in `dist`, and the signing key already in your keyring, the script doesn't need the internet to start Prysm.
+
+## Check the signing key
+
+The script checks signatures against key `0AE0051D647BA3C1A917AF4072E33E4DF1A5036E`, which it downloads from `https://prysmaticlabs.com/releases/pgp_keys.asc` the first time.
+
+`gpg --verify` accepts a valid signature from **any** key in your keyring, so read the fingerprint gpg prints, not only the final green line. It must be:
+
+```text
+Primary key fingerprint: 0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+```
+
+To inspect the key yourself:
+
+```bash
+gpg --list-keys --with-fingerprint 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+```
+
+For more on why this matters, see [Verify the software you run](/security/verify-software/).
+
+## Check that it works
+
+Ask each program for its version:
+
+```bash
+./prysm.sh beacon-chain --version
+./prysm.sh validator --version
+```
+
+The last line should name the release you expect, for example:
+
+```text
+beacon-chain version Prysm/v7.2.0/03f3712a184c1c7cc9fd38d3b1abc5328934cdef. Built at: 2026-09-25 15:43:49+00:00
+```
+
+This shows what the script would start now. A beacon node that's already running keeps its old version until you restart it.
+
+## Troubleshooting
+
+**`gpg is not available. Either install it or run with PRYSM_ALLOW_UNVERIFIED_BINARIES=1.`**
+Install GnuPG (see [Before you begin](#before-you-begin)) and run the command again. Don't switch verification off to get past this.
+
+**`Starting prysm requires an internet connection...`**
+The script couldn't reach `prysmaticlabs.com` to look up the latest release. Check your connection, DNS and any firewall or antivirus that blocks `curl`. To start without the lookup, pin a version you've already downloaded with `USE_PRYSM_VERSION`.
+
+**`Failed to verify Prysm binary.`**
+The download is incomplete or corrupted. Delete the files for that version from `dist` (the binary and its `.sha256` and `.sig`) and run the script again. If it keeps failing, download the release by hand and [verify it yourself](/install/binaries/#verify-the-download), and ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP).
+
+**`No prysm beacon chain found for v7.2.0,(beacon-chain-v7.2.0-modern-darwin-arm64) exit`**
+There's no asset for that combination. The `modern` build only exists for Linux amd64: unset `USE_PRYSM_MODERN`. Also check that `USE_PRYSM_VERSION` holds a real tag, including the leading `v`.
+
+**`32-bit ARM is not supported. Please install a 64-bit operating system.`**
+Prysm needs a 64-bit OS. On a Raspberry Pi, install a 64-bit image.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Sync from a checkpoint](/setup/checkpoint-sync/)
+- [Update and roll back](/install/update/)
+- [Run with systemd](/setup/systemd/)

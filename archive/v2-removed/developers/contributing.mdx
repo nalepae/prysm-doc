@@ -1,0 +1,147 @@
+---
+title: Contribute a change
+description: How to contribute to Prysm, from choosing an issue to a merged pull request, including changelog fragments, required checks, linters, code conventions and the contributor license agreement.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+
+Prysm is developed in the open at [github.com/OffchainLabs/prysm](https://github.com/OffchainLabs/prysm), and outside contributions are welcome. This page walks through what a pull request needs to be reviewed and merged. The repository's [`CONTRIBUTING.md`](https://github.com/OffchainLabs/prysm/blob/develop/CONTRIBUTING.md) and pull request template are the authoritative source if anything here differs.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/) so you can build and test with Bazel.
+- A GitHub account.
+
+## What makes a good contribution
+
+- **Start from an issue.** Look at the [open issues](https://github.com/OffchainLabs/prysm/issues), or open one to describe the bug or feature first. Features and most bug fixes should have an issue where the design has been discussed. Small bug fixes and documentation improvements don't need one.
+- **Don't send trivial changes.** Pull requests that only fix typos or make similar trivial edits are rejected: they cost reviewer time for little value. If you're unsure whether a change is worth it, open an issue first.
+- **Don't update dependencies or the Go version.** Pull requests that do are not accepted from contributors. Open an issue instead.
+- **Include tests.** New features and bug fixes must have tests.
+- **Report security issues privately.** Never open a public issue for a vulnerability. Follow the reporting instructions in [`SECURITY.md`](https://github.com/OffchainLabs/prysm/blob/develop/SECURITY.md).
+
+To file a bug, use the bug report template on GitHub and include the Prysm version, how you run it, and all your flags. There are also templates for feature requests, feature flags and discussions.
+
+## Make and submit a change
+
+<Steps>
+
+1. Fork the repository on GitHub, then add your fork as a remote of your clone:
+
+   ```bash
+   git remote add fork https://github.com/<YOUR_GITHUB_USER>/prysm.git
+   ```
+
+2. Create a branch from an up-to-date `develop`:
+
+   ```bash
+   git fetch origin
+   git switch -c <BRANCH_NAME> origin/develop
+   ```
+
+3. Make your change, with tests. Follow the [conventions](#code-conventions) below.
+
+4. Add a [changelog fragment](#add-a-changelog-fragment).
+
+5. Run the [checks](#run-the-checks-before-you-push) locally.
+
+6. Commit and push to your fork:
+
+   ```bash
+   git add <FILES>
+   git commit -m "<SHORT_DESCRIPTION_OF_THE_CHANGE>"
+   git push fork <BRANCH_NAME>
+   ```
+
+7. Open a pull request against `develop` and fill in the template: what type of PR it is, what it does and why, the issue it fixes (`Fixes #<ISSUE>`), and notes for reviewers, including how you tested it.
+
+8. Sign the Contributor License Agreement. A bot comments on your first pull request with a link. The team can't review code without a signed CLA.
+
+9. Respond to review. Push more commits to the same branch; the pull request updates on its own. Leave a comment when it's ready for another look.
+
+</Steps>
+
+## Add a changelog fragment
+
+Every pull request needs a new file in `changelog/`, one per pull request, so that parallel pull requests never conflict on a shared changelog. At release time, the [unclog](https://github.com/OffchainLabs/unclog) tool merges the fragments into `CHANGELOG.md`.
+
+Name the file `changelog/<GITHUB_USER>_<BRANCH_NAME>.md`. Inside, use one or more of these [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) sections, each with a bullet list:
+
+| Section | Use it for |
+| --- | --- |
+| `### Added` | New features, flags, endpoints. |
+| `### Changed` | Changes to existing behavior. |
+| `### Deprecated` | Features that will be removed. |
+| `### Removed` | Features, flags or endpoints that are gone. |
+| `### Fixed` | Bug fixes. |
+| `### Security` | Vulnerability fixes. |
+| `### Ignored` | Changes that shouldn't appear in the release notes, such as refactors, test fixes and CI changes. |
+
+```markdown title="changelog/<GITHUB_USER>_<BRANCH_NAME>.md"
+### Fixed
+
+- Fixed data column sidecars post-Gloas in the Beacon API.
+```
+
+Write for node operators: say what changed for them, not how the code changed. Use `### Ignored` when the change isn't user-facing; it still satisfies the check. The `changelog` workflow runs `unclog check` on the fragments your pull request adds and fails if there are none or a fragment is malformed.
+
+## Run the checks before you push
+
+These are the checks CI runs that most often fail. Running them first saves a round trip.
+
+| Check | Command | Fix |
+| --- | --- | --- |
+| Formatting | `gofmt -l <FILES>` and `goimports -l <FILES>` | Run with `-w` instead of `-l`. |
+| BUILD files | `bazel run //:gazelle -- fix --mode=diff` | `bazel run //:gazelle -- fix` |
+| `deps.bzl` (if `go.mod` changed) | `bazel run //:gazelle -- update-repos -from_file=go.mod -to_macro=deps.bzl%prysm_deps -prune=true`, then `git diff deps.bzl` | Commit the updated `deps.bzl`. |
+| Generated code | `./hack/check-bazel-drift.sh` | See [Generated code](/developers/code-generation/). |
+| Build and static analysis | `bazel build //cmd/...` | Fix what nogo reports (see below). |
+| Unit tests | `bazel test //<PACKAGE>/...` for each package you changed | See [Unit tests](/developers/unit-tests/). |
+
+CI also runs the [spec tests](/developers/spec-tests/), the presubmit [end-to-end tests](/developers/e2e-tests/), and the GitHub workflows in `.github/workflows/`: `golangci-lint`, gosec, `go mod tidy -diff`, a fuzz build, the generated-code and `log.go` checks, spec reference checks, and the changelog check.
+
+## Linters and static analysis
+
+Two layers of analysis run on your code:
+
+- **nogo**, during every Bazel build. The analyzer list is in the root `BUILD.bazel`: checks from `golang.org/x/tools`, a curated set of `staticcheck` checks, and Prysm's own analyzers in `tools/analyzers/`. A finding fails the build. Per-analyzer exclusions are in `nogo_config.json`; add one only with a reason, and expect reviewers to ask about it.
+- **golangci-lint**, in the `go.yml` workflow. `.golangci.yml` enables `errcheck`, `ineffassign` and `govet`, plus the `gofmt` and `goimports` formatters.
+
+Prysm's own analyzers enforce project rules you might not expect:
+
+| Analyzer | Rule |
+| --- | --- |
+| `logcapitalization` | Log messages start with a capital letter. |
+| `logruswitherror` | Pass errors with `log.WithError(err)`, not inside a formatted message. |
+| `nopanic` | No `panic()` outside `init` functions and rare cases. |
+| `cryptorand` | Use Prysm's `crypto/rand`, not `math/rand`. |
+| `properpermissions` | Write files through Prysm's file utilities (`io/file`), not `os.MkdirAll` or `os.WriteFile` directly. |
+| `featureconfig` | Tests that set feature flags use `features.InitWithReset` so they don't leak globals. |
+| `uintcast` | No unchecked casts to smaller or signed integer types. Suppress with a `lint:ignore uintcast` comment and a justification. |
+| `recursivelock`, `comparesame`, `shadowpredecl`, `slicedirect`, `httpwriter`, `interfacechecker`, `gocognit`, `modernize/*` | Other correctness and style checks; the error message names the analyzer. |
+
+## Code conventions
+
+- **Follow the spec.** Consensus behavior comes from the [consensus specs](https://github.com/ethereum/consensus-specs). Name functions and variables after the spec where it helps readers match code to spec, and link the spec section in a comment.
+- **Keep comments short.** Explain why, not what, in one line where possible. Exported identifiers need a doc comment that starts with the name.
+- **Handle every error.** Wrap errors with context using `github.com/pkg/errors` (`errors.Wrap(err, "could not …")`), the way the surrounding code does.
+- **Log with fields.** Use `log.WithField(…)`/`log.WithFields(…)` for values instead of formatting them into the message, and `log.WithError(err)` for errors.
+- **Prefer subtests.** When several tests exercise the same function, write one test with `t.Run` subtests rather than separate functions.
+- **Put new flags behind the right package.** Beacon node flags live in `cmd/beacon-chain/flags/`, validator flags in `cmd/validator/flags/`, shared flags in `cmd/`, and feature flags in `config/features/`. A new flag needs a changelog entry.
+
+## Get help
+
+Ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP) if you're stuck on setup, want to discuss an approach before writing code, or need a reviewer's attention. For questions about the Beacon API itself, see the [beacon-APIs repository](https://github.com/ethereum/beacon-APIs), which is maintained separately from Prysm.
+
+## Check that it works
+
+Before you ask for review, your pull request shows:
+
+- A signed CLA.
+- A changelog fragment in `changelog/`.
+- All required checks green, or a comment explaining any failure you believe is unrelated.
+
+## Next steps
+
+- [Unit tests](/developers/unit-tests/)
+- [Generated code](/developers/code-generation/)

@@ -1,0 +1,119 @@
+---
+title: How an Ethereum node works
+description: What the execution client, the Prysm beacon node and the validator client each do, the APIs between them, and what happens when one of them fails.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import NodeArchitecture from '@site/src/components/diagrams/NodeArchitecture';
+import SlotTimeline from '@site/src/components/diagrams/SlotTimeline';
+
+A staking node is three programs: an **execution client** that runs transactions, a **beacon node** that runs proof-of-stake consensus, and a **validator client** that holds your keys and signs. The beacon node sits in the middle. It drives the execution client over the Engine API and serves the validator client over the Beacon API.
+
+<NodeArchitecture />
+
+Solid boxes are required to stake. Dashed boxes are optional: MEV-Boost for [outsourced block building](/learn/mev-and-block-building/) and a [remote signer](/setup/topologies/remote-signer/) that keeps keys away from the validator client.
+
+## The three processes
+
+| | Execution client (EL) | Beacon node (BN) | Validator client (VC) |
+| --- | --- | --- | --- |
+| **Examples** | Geth, Nethermind, Besu, Erigon, Reth, Ethrex | Prysm `beacon-chain` | Prysm `validator` |
+| **Job** | Executes the transactions in each block, keeps the account and contract state, keeps a mempool, builds block payloads | Follows the proof-of-stake chain, runs fork choice, verifies blocks and attestations, tells the EL which block is the head | Asks the BN what to do, signs blocks and attestations, refuses to sign anything slashable |
+| **Stores** | Execution blocks and state (hundreds of GB to several TB) | Beacon blocks, beacon states, blobs and data columns | Keystores or remote-signer config, the slashing protection database |
+| **Talks to** | Its own P2P network, the BN | Its own P2P network, the EL, validator clients, optionally MEV-Boost | One or more BNs, optionally a remote signer |
+| **Needed for** | Every node | Every node | Staking only |
+
+An execution client can't follow the chain on its own since the Merge: it only learns which block is canonical from the beacon node. A beacon node can't verify blocks without an execution client, because every beacon block carries an execution payload. You always run both. The validator client is only needed if you stake.
+
+## Engine API: beacon node ↔ execution client
+
+The beacon node is the client and the execution client is the server. Prysm connects to <Flag name="execution-endpoint" /> (default `http://localhost:8551`) and signs every request with a short-lived JWT made from the shared secret in <Flag name="jwt-secret" />. Both programs must read the same 32-byte hex file, or the execution client rejects the calls. Port 8551 should never be reachable from the internet.
+
+Three methods do almost all the work:
+
+| Method | Direction and purpose | When |
+| --- | --- | --- |
+| `engine_newPayload` | BN → EL: "here is the execution payload from a new beacon block, execute it." The EL answers `VALID`, `INVALID`, or `SYNCING`/`ACCEPTED` if it can't check it yet. | For every block the BN imports, from gossip or during sync. |
+| `engine_forkchoiceUpdated` | BN → EL: "this is the head, this is the safe block, this is the finalized block." Optionally with **payload attributes** (timestamp, fee recipient, withdrawals), which tell the EL to start building a block on top of the head. | After fork choice changes the head, and ahead of a slot in which one of your validators proposes. |
+| `engine_getPayload` | BN → EL: "give me the payload you've been building." Returns the payload, its value to the fee recipient, and the blobs bundle. | When your validator proposes. |
+
+The method names carry a version suffix (`engine_newPayloadV4`, and so on). Prysm picks the right version for the current fork. It also calls helper methods such as `engine_exchangeCapabilities` at startup and `engine_getBlobs`, which fetches blobs the EL already has in its mempool so the BN doesn't have to wait for them on gossip.
+
+To connect the two, follow [Connect an execution client](/setup/connect-execution-client/).
+
+## Beacon API and gRPC: validator client ↔ beacon node
+
+The validator client is a thin, stateless-looking program with one crucial piece of state: the slashing protection database. Everything else it asks the beacon node for:
+
+1. **Duties.** At the start of each epoch the VC asks which of its validators must attest (and in which slot and committee), propose, or take part in a sync committee, for this epoch and the next. It asks again if the BN reports a reorg that changes them.
+2. **Data to sign.** For an attestation, the BN returns the attestation data (the head block root plus source and target checkpoints). For a proposal, the BN builds the whole block and returns it unsigned.
+3. **Signed messages back.** The VC checks each message against its slashing protection database, signs it (or has the remote signer sign it), and submits it. The BN checks it and broadcasts it to the network.
+4. **Registrations and preferences.** The VC tells the BN each validator's fee recipient and, with MEV-Boost, sends signed builder registrations.
+
+Prysm's validator client connects over gRPC to <Flag name="beacon-rpc-provider" bin="validator" /> (default `127.0.0.1:4000`) or over the standard REST Beacon API to <Flag name="beacon-rest-api-provider" bin="validator" /> (default `http://127.0.0.1:3500`). gRPC is still the default but is being phased out in favor of REST. See [Validator client flags](/flags/validator/).
+
+## Two peer-to-peer networks
+
+A node belongs to two separate networks with different protocols and ports:
+
+- **Consensus network.** Beacon nodes find each other with discv5 (UDP, Prysm default port 12000) and talk over libp2p (TCP and QUIC, default port 13000). They gossip beacon blocks, attestations, aggregates, sync committee messages, blob data columns, exits and slashings, and fetch history from each other on request.
+- **Execution network.** Execution clients use devp2p to gossip transactions (including blob transactions) and to sync execution state. Blocks are no longer gossiped here; they arrive through the beacon node.
+
+Both networks need inbound connections to work well. See [Peers, ports and NAT](/setup/networking/) and the [port reference](/reference/ports/).
+
+## One slot, end to end
+
+Every 12 seconds, one validator somewhere proposes a block and a committee of others attests to it. From your node's point of view:
+
+- **If one of your validators proposes,** the BN has already sent `forkchoiceUpdated` with payload attributes so the EL is building a payload. At the start of the slot the VC asks for a block; the BN calls `getPayload` (or gets a builder bid through MEV-Boost), assembles the block and returns it; the VC signs it; the BN publishes it.
+- **For every block that arrives,** the BN checks the consensus rules, calls `newPayload` so the EL executes the transactions, updates fork choice, and calls `forkchoiceUpdated` with the new head.
+- **Your attesters** sign as soon as the block for the slot is valid, or 4 seconds into the slot, whichever comes first. Aggregators publish aggregates at 8 seconds.
+
+<SlotTimeline />
+
+[The life of a slot](/learn/life-of-a-slot/) walks through each step with the exact timings.
+
+## When something fails or falls behind
+
+Most staking losses come from one of these situations. Knowing which process is at fault tells you where to look.
+
+### The execution client is syncing or unavailable
+
+If the EL answers `SYNCING` or `ACCEPTED`, Prysm imports the block **optimistically**: it follows the chain on the assumption the payload is valid, and checks later. While the head is optimistic the beacon node refuses validator requests for attestation data and blocks, with the error `the node is currently optimistic and cannot serve validators`, because it can't vouch for a head it hasn't verified. Your validators miss their duties until the EL catches up.
+
+If the EL is down or the JWT secret doesn't match, the BN can't verify new blocks at all, and the same thing happens. Check [How syncing works](/learn/syncing/#optimistic-sync) and the EL's own logs.
+
+### The beacon node is down, syncing or poorly connected
+
+The validator client can't do anything without a beacon node. While the BN syncs, the VC logs `Waiting for beacon node to sync to latest chain head`. If the BN is unreachable, the VC logs connection errors and every duty is missed.
+
+A BN with few peers is subtler: it may see blocks late and produce attestations that vote for the wrong head, or are included too late to earn full rewards. See [Check node and validator health](/operate/check-health/).
+
+To survive a BN outage, give the VC more than one beacon node. <Flag name="beacon-rest-api-provider" bin="validator" /> accepts a comma-separated list; the validator client listens to all of them and uses the best response.
+
+### The validator client is down
+
+The node keeps following the chain, but your validators don't sign anything. Each missed attestation is penalized by about three quarters of what a correct one earns, so a day offline sets your balance back by roughly three quarters of a day's attestation rewards. A missed proposal loses that block's rewards and fees for good. If more than a third of all stake is offline at once, the chain stops finalizing and offline validators lose far more: see [inactivity leak](/learn/rewards-penalties-slashing/#the-inactivity-leak).
+
+Being offline never gets you slashed. **Running the same keys in two places does.** Never "fail over" a validator client by starting a second copy with the same keys: see [Avoid slashing](/security/avoid-slashing/).
+
+## One beacon node, many validator clients
+
+A validator client can manage thousands of validators, and one beacon node can serve many validator clients. The BN doesn't hold keys or care which VC a validator belongs to. This is how staking operators split keys across machines or teams while sharing one node. See [Several validator clients, one beacon node](/setup/topologies/multiple-validator-clients/).
+
+The limits are practical: each validator adds attestation and subscription work to the BN, and since Fulu the BN's [data custody](/learn/blobs-and-peerdas/#custody) grows with the stake attached to it.
+
+## Where MEV-Boost and a remote signer plug in
+
+- **MEV-Boost** runs next to the beacon node. When one of your validators proposes, the BN asks MEV-Boost for a bid over the Builder API (<Flag name="http-mev-relay" />), and MEV-Boost asks your configured relays. The BN still gets a local payload from the EL and uses whichever is worth more, with safety fallbacks. The validator client only sees a (blinded) block to sign. See [MEV and block building](/learn/mev-and-block-building/).
+- **A remote signer** such as Web3Signer holds the keys instead of the validator client. The VC still fetches duties and data from the BN, but sends each signing request to the signer over HTTP (<Flag name="validators-external-signer-url" bin="validator" />). Prysm's validator client still checks its own slashing protection database before submitting anything. See [Validator with a remote signer](/setup/topologies/remote-signer/).
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="The life of a slot" description="Every message in a 12-second slot, with timings." href="/learn/life-of-a-slot/" />
+	<LinkCard title="How syncing works" description="Checkpoint sync, backfill and optimistic sync." href="/learn/syncing/" />
+	<LinkCard title="Connect an execution client" description="Set up the Engine API and JWT secret." href="/setup/connect-execution-client/" />
+	<LinkCard title="Choose a topology" description="Where to run each process." href="/setup/topologies/" />
+</CardGrid>

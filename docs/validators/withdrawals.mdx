@@ -1,0 +1,124 @@
+---
+title: "Withdrawals and consolidation"
+description: "Check your withdrawal credentials, understand automatic withdrawals, add a withdrawal address to old 0x00 validators, and upgrade or consolidate validators to 0x02 compounding."
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Withdrawals send ETH from your validator to its **withdrawal address**. The regular ones are automatic: you don't send a transaction, and they cost no gas. What gets paid, and when, depends on the validator's **withdrawal credentials**.
+
+## Check your credentials
+
+Ask your beacon node:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY> \
+  | jq '.data.validator.withdrawal_credentials'
+```
+
+The start tells you the type, and the last 40 hex characters are the withdrawal address:
+
+| Credentials | Paid automatically | On request from the withdrawal address |
+| --- | --- | --- |
+| `0x00…` (legacy) | Nothing, until you add an address (below) | Nothing |
+| `0x01…` (regular) | Everything above 32 ETH while active; the full balance after exit | Full exit |
+| `0x02…` (compounding) | Everything above 2048 ETH while active; the full balance after exit | Full exit, partial withdrawal, consolidation |
+
+Once set, the withdrawal address can't be changed.
+
+## Automatic withdrawals
+
+The network goes through all validators in turn and pays out what each one has to withdraw. On mainnet a full round takes several days, so expect a payment every few days to a week or more. You don't need to do anything.
+
+- **Partial withdrawal:** an active validator's balance above its maximum (32 ETH for `0x01`, 2048 ETH for `0x02`) is paid out.
+- **Full withdrawal:** after you [exit](/validators/exit/), the whole balance is paid out.
+
+Withdrawals aren't transactions. On a block explorer, look for them under "withdrawals" for your validator or address.
+
+## Add a withdrawal address to a `0x00` validator
+
+Validators created without a withdrawal address have `0x00` credentials and receive nothing. To fix this, sign a change with your **mnemonic** in the deposit CLI, then submit it with `prysmctl`. You can do this once per validator.
+
+:::danger[The address is permanent]
+Use an address you control, never an exchange address, and compare every character. Only ever type your mnemonic into the deposit CLI on a machine you trust, ideally offline. Websites that offer to "help" with this step are phishing.
+:::
+
+<Steps>
+
+1. **Collect the inputs:** each validator's index and current `0x00` credentials (from the command above), and the key index of the first one in your mnemonic (usually `0`; it's the number in the keystore file name, `keystore-m_12381_3600_<INDEX>_0_0-...`).
+
+2. **Sign the change** with the [deposit CLI](/validators/create-keys/):
+
+   {/* Verified against ethstaker-deposit-cli v1.3.0 docs, 2026-09 */}
+   ```bash
+   ./deposit generate-bls-to-execution-change \
+     --chain=hoodi \
+     --validator_start_index=<FIRST_KEY_INDEX> \
+     --validator_indices=<VALIDATOR_INDEX_1>,<VALIDATOR_INDEX_2> \
+     --bls_withdrawal_credentials_list=<OLD_CREDENTIALS_1>,<OLD_CREDENTIALS_2> \
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   It asks for your mnemonic and writes a file to `bls_to_execution_changes/`. Check that every `to_execution_address` in it is your address.
+
+3. **Submit it with prysmctl** to a synced beacon node (any client's REST API):
+
+   ```bash
+   ./prysm.sh prysmctl validator withdraw \
+     --beacon-node-host=http://127.0.0.1:3500 \
+     --path=<PATH_TO>/bls_to_execution_changes \
+     --accept-terms-of-use \
+     --confirm
+   ```
+
+   You should see:
+
+   ```text
+   INFO validator: Successfully published messages to update 2 withdrawal addresses.
+   ```
+
+</Steps>
+
+The change is usually included within minutes. Check your credentials again: they now start with `0x01` and end with your address.
+
+## Compounding (`0x02`) and consolidation
+
+A compounding validator keeps its rewards staked, up to 2048 ETH, so they earn rewards too. It also lets you run one validator instead of several.
+
+- **New validators:** create keys with `--compounding`. See [Create validator keys](/validators/create-keys/).
+- **Upgrade a `0x01` validator** to `0x02` in place. This is one-way: afterwards, rewards above 32 ETH are no longer paid out automatically; you request a partial withdrawal when you want them.
+- **Consolidate** validator A into validator B: A's balance moves to B, and A exits. B must have `0x02` credentials, and both must share the same withdrawal address.
+- **Partial withdrawal** from a `0x02` validator: withdraw a chosen amount, as long as 32 ETH stays.
+
+All four requests are sent **from your withdrawal address**, not from Prysm. The simplest way is **Validator actions** on the Staking Launchpad (`https://launchpad.ethereum.org/en/validator-actions`, or the same page on the Hoodi launchpad): connect the wallet that controls the withdrawal address, pick the validator and the action. Each request costs a small fee. When many requests are waiting, processing can take days.
+{/* Verified against ethereum/staking-launchpad (dev branch, src/pages/Actions and src/utils/envVars.ts), 2026-09 */}
+
+:::caution[Consolidation exits the source]
+Keep B's validator running. Stop A's validator client only after A has exited. Try a consolidation on Hoodi first.
+:::
+
+## Check that it works
+
+- **Credentials:** run the credentials check after each change.
+- **Pending requests:** your beacon node shows queued partial withdrawals and consolidations:
+
+  ```bash
+  curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/pending_partial_withdrawals | jq
+  curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/pending_consolidations | jq
+  ```
+
+- **Payments:** block explorers such as [beaconcha.in](https://beaconcha.in) list withdrawals per validator and per address.
+
+## Troubleshooting
+
+**No withdrawals arrive.** Check the credentials: `0x00` validators receive nothing. A new `0x01` validator has little above 32 ETH to pay out. A `0x02` validator pays nothing automatically until it exceeds 2048 ETH.
+
+**`generate-bls-to-execution-change` fails on the credentials.** The start index or the order of validator indices doesn't match your mnemonic's keys. Check the key index in your keystore file names.
+
+**prysmctl says the messages were not found in the pool.** They were probably already included. Check the credentials; if they're still `0x00` after an hour, submit again.
+
+## Next steps
+
+- [Exit a validator](/validators/exit/)
+- [Keys and withdrawal credentials](/learn/keys-and-withdrawals/)

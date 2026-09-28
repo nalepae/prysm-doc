@@ -1,0 +1,175 @@
+---
+title: Prysm-specific APIs
+description: Reference for the REST endpoints only Prysm serves under /prysm/v1/, the monitoring endpoints, and the legacy gRPC API, with request examples.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Besides the standard [Beacon API](/reference/apis/beacon-api/), a Prysm beacon node serves a small set of REST endpoints that no other client has. They expose data Prysm computes internally, such as per-validator vote details, participation totals and PeerDAS custody, and let you manage trusted peers at runtime. This page lists them all, plus the monitoring endpoints and the legacy gRPC API.
+
+Tools that must work with every consensus client should stick to the standard API. Use these endpoints when you run Prysm and need what they return.
+
+## Before you begin
+
+- The endpoints share the Beacon API server: `http://127.0.0.1:3500` by default, set by <Flag name="http-host" /> and <Flag name="http-port" />.
+- There's no authentication. Keep the port private, as described in [Expose APIs safely](/security/apis/).
+
+## REST endpoints
+
+| Method and path | Returns or does |
+| --- | --- |
+| `GET /prysm/v1/beacon/chain_head` | Head, finalized, justified and previous justified slots, epochs and roots, plus optimistic status |
+| `GET /prysm/v1/beacon/weak_subjectivity` | The current weak subjectivity checkpoint and its state root |
+| `GET /prysm/v1/beacon/states/{state_id}/validator_count` | Validator counts by status |
+| `POST /prysm/v1/beacon/individual_votes` | Per-validator attestation details for an epoch |
+| `POST /prysm/v1/beacon/states/{state_id}/query` | One field of a beacon state, as SSZ (SSZ query) |
+| `POST /prysm/v1/beacon/blocks/{block_id}/query` | One field of a block, as SSZ, optionally with a Merkle proof |
+| `POST /prysm/v1/beacon/blobs` | Publishes blobs. Not supported after the Fulu fork; don't use it on current networks |
+| `GET /prysm/v1/node/trusted_peers` | Trusted peers |
+| `POST /prysm/v1/node/trusted_peers` | Adds a trusted peer |
+| `DELETE /prysm/v1/node/trusted_peers/{peer_id}` | Removes a trusted peer |
+| `GET /prysm/v1/node/custody` | PeerDAS custody groups and columns, supernode status and backfill progress |
+| `POST /prysm/v1/validators/performance` | Vote correctness and balance changes for chosen validators |
+| `GET /prysm/v1/validators/{state_id}/participation` | Network-wide attesting balances for the state's epoch |
+| `GET /prysm/v1/validators/{state_id}/active_set_changes` | Validators activated, exited, slashed or ejected in the state's epoch |
+
+`{state_id}` and `{block_id}` take the same values as in the Beacon API: `head`, `genesis`, `finalized`, `justified`, a slot or a `0x`-prefixed root.
+
+Prysm also serves these routes under older paths, kept for compatibility: `/prysm/node/trusted_peers`, `/prysm/node/trusted_peers/{peer_id}`, `/prysm/validators/performance`, and `/eth/v1/beacon/states/{state_id}/validator_count` (not part of the Beacon API specification). Prefer the `/prysm/v1/` paths in new code.
+
+Handlers live in `beacon-chain/rpc/prysm/` in the Prysm repository, and routes are registered in `beacon-chain/rpc/endpoints.go`.
+
+## Examples
+
+### Chain head
+
+```bash
+curl -s http://127.0.0.1:3500/prysm/v1/beacon/chain_head
+```
+
+The response has `head_slot`, `head_epoch`, `head_block_root`, the matching `finalized_*`, `justified_*` and `previous_justified_*` fields, and `optimistic_status`.
+
+### Validator count by status
+
+```bash
+curl -s "http://127.0.0.1:3500/prysm/v1/beacon/states/head/validator_count?status=active,pending"
+```
+
+```json
+{"execution_optimistic":"false","finalized":"false","data":[{"status":"active","count":"<COUNT>"},{"status":"pending","count":"<COUNT>"}]}
+```
+
+`status` accepts the Beacon API validator statuses (`pending_initialized`, `pending_queued`, `active_ongoing`, `active_exiting`, `active_slashed`, `exited_unslashed`, `exited_slashed`, `withdrawal_possible`, `withdrawal_done`) and the groups `pending`, `active`, `exited` and `withdrawal`. Omit it to count every status.
+
+### Individual votes
+
+Epoch, public keys and indices are strings; public keys are `0x`-prefixed hex:
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"epoch":"<EPOCH>","indices":["<VALIDATOR_INDEX>"]}' \
+  http://127.0.0.1:3500/prysm/v1/beacon/individual_votes
+```
+
+Each entry reports whether the validator attested in the current and previous epoch, whether it voted for the correct target and head, its inclusion slot and distance, effective balance and inactivity score.
+
+### Validator performance
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"indices":[<VALIDATOR_INDEX>]}' \
+  http://127.0.0.1:3500/prysm/v1/validators/performance
+```
+
+<Aside type="caution" title="Different encoding from the other endpoints">
+This endpoint takes `indices` as JSON **numbers**, and `public_keys` in both the request and the response are **base64**, not hex. Balances in the response are numbers in Gwei.
+</Aside>
+
+The response has parallel arrays: `correctly_voted_source`, `correctly_voted_target`, `correctly_voted_head`, `current_effective_balances`, `balances_before_epoch_transition`, `balances_after_epoch_transition` and `inactivity_scores`, plus `missing_validators` for keys the node doesn't know. The Prysm validator client calls this endpoint to log per-epoch performance when it connects over REST.
+
+### Participation
+
+```bash
+curl -s http://127.0.0.1:3500/prysm/v1/validators/head/participation
+```
+
+The `participation` object reports active and attesting balances in Gwei for the current and previous epoch (`current_epoch_active_gwei`, `previous_epoch_target_attesting_gwei` and so on). `global_participation_rate`, `voted_ether` and `eligible_ether` are deprecated; compute ratios from the Gwei fields.
+
+### Trusted peers
+
+Trusted peers are peers the node always keeps connected, the runtime equivalent of <Flag name="peer" />. Add one by multiaddress, including its `/p2p/` peer ID:
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"addr":"<PEER_MULTIADDR>"}' \
+  http://127.0.0.1:3500/prysm/v1/node/trusted_peers
+```
+
+Replace `<PEER_MULTIADDR>` with an address such as `/ip4/<IP>/tcp/13000/p2p/<PEER_ID>`. List them with `GET` on the same path, and remove one with `DELETE /prysm/v1/node/trusted_peers/<PEER_ID>`.
+
+### PeerDAS custody
+
+```bash
+curl -s http://127.0.0.1:3500/prysm/v1/node/custody
+```
+
+The `data` object has `custody_group_count`, `custody_groups`, `custody_columns`, `earliest_available_slot`, `is_supernode` and `is_semi_supernode`. On checkpoint-synced nodes it also has `backfill` with `origin_slot` and `low_slot`, which show how far historical backfill has reached. See [Blobs and PeerDAS](/learn/blobs-and-peerdas/) for what custody means.
+
+### SSZ query
+
+The query endpoints return a single field of a state or block without downloading the whole object. The body names the field with a path in snake case, using dots for nesting, `[n]` for list elements and `len(...)` for a list's length:
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/octet-stream" \
+  -d '{"query":".body.attestations[0].data.slot","include_proof":true}' \
+  -o result.ssz \
+  http://127.0.0.1:3500/prysm/v1/beacon/blocks/head/query
+```
+
+The response is SSZ, not JSON: an `SSZQueryResponse` container with the object's `root` and the raw `result` bytes, or `SSZQueryResponseWithProof`, which adds the Merkle `proof` (leaf, generalized index and sibling hashes), when you set `include_proof` on the block endpoint. The state endpoint ignores `include_proof`. For `len(...)` queries, `result` is a little-endian `uint64`. Types are defined in `proto/ssz_query/`, and the path syntax is described in `encoding/ssz/query/doc.md` in the Prysm repository.
+
+## Monitoring endpoints
+
+The monitoring server, on `127.0.0.1:8080` for the beacon node (<Flag name="monitoring-host" />, <Flag name="monitoring-port" />) and `127.0.0.1:8081` for the validator client (<Flag name="monitoring-port" bin="validator" />), serves more than metrics:
+
+| Path | Returns |
+| --- | --- |
+| `/metrics` | Prometheus metrics |
+| `/healthz` | Status of every internal service, one per line; `200` when all are healthy, `503` otherwise. Send `Accept: application/json` for JSON |
+| `/goroutinez` | A stack dump of the process |
+| `/p2p` | Beacon node only: the node's P2P identity and peer information |
+
+```bash
+curl -s http://127.0.0.1:8080/healthz
+```
+
+The beacon node also reports unhealthy when its average goroutine count over 10 slots exceeds <Flag name="healthz-max-goroutines" />. Turn the whole server off with <Flag name="disable-monitoring" />. For metrics, see [Metrics and dashboards](/operate/metrics/). For profiling, see [Debugging and profiling](/developers/debugging/).
+
+## gRPC API
+
+The beacon node also serves Prysm's original gRPC API on `127.0.0.1:4000` (<Flag name="rpc-host" />, <Flag name="rpc-port" />). The Prysm validator client uses it by default. It isn't HTTP, so `curl` doesn't work on that port.
+
+The services are in the `ethereum.eth.v1alpha1` package, defined in `proto/prysm/v1alpha1/`: `BeaconNodeValidator`, `BeaconChain`, `Node`, `Health` and, unless you pass <Flag name="disable-debug-rpc-endpoints" />, `Debug`. The server supports reflection, so [grpcurl](https://github.com/fullstorydev/grpcurl) can discover them:
+
+```bash
+grpcurl -plaintext 127.0.0.1:4000 list
+grpcurl -plaintext 127.0.0.1:4000 ethereum.eth.v1alpha1.Node/GetSyncStatus
+```
+
+Prysm's flag help states: "The gRPC API will remain the default and fully supported through v8 (expected in 2026) but will be eventually removed in favor of REST API." Don't build new tools on it. The HTTP gateway that once served gRPC methods over REST was removed in v5.1.1 (see the Prysm `CHANGELOG.md`); the `/prysm/v1/` REST endpoints above replace the parts of it that remain.
+
+## Validator client web API
+
+A validator client started with <Flag name="web" bin="validator" /> or <Flag name="rpc" bin="validator" /> also serves `/v2/validator/*` routes (wallet, accounts, slashing protection export, log streams) on port 7500. They exist for the Prysm web interface, change with it, and aren't a stable interface. They need the same bearer token as the [Keymanager API](/reference/apis/keymanager-api/#authenticate). For scripts, use the Keymanager API instead.
+
+## Next steps
+
+- [Beacon API](/reference/apis/beacon-api/): the standard endpoints.
+- [Keymanager API](/reference/apis/keymanager-api/): manage validator keys over REST.
+- [API flags](/flags/apis/): hosts, ports, CORS and timeouts.

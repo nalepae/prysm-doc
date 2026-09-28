@@ -1,0 +1,218 @@
+---
+title: Dashboards and alerts
+description: Run Prometheus and Grafana next to Prysm with one Docker Compose file, import the Prysm dashboards, alert on the five metrics that matter, and control logging.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Prysm exposes [Prometheus](https://prometheus.io/) metrics out of the box. This page runs Prometheus and [Grafana](https://grafana.com/) with Docker Compose, loads the Prysm dashboards, and sets up alerts, so you hear about problems before your balance does.
+
+## Before you begin
+
+- A running beacon node and, if you stake, a validator client, on Linux. On macOS or Windows, see the note after step 1.
+- [Docker with Compose](https://docs.docker.com/compose/install/).
+
+Metrics are on by default, on the local machine only:
+
+| Process | URL | Change with |
+| --- | --- | --- |
+| Beacon node | `http://127.0.0.1:8080/metrics` | <Flag name="monitoring-host" />, <Flag name="monitoring-port" /> |
+| Validator client | `http://127.0.0.1:8081/metrics` | <Flag name="monitoring-host" bin="validator" />, <Flag name="monitoring-port" bin="validator" /> |
+
+Check that they respond:
+
+```bash
+curl -s http://127.0.0.1:8080/metrics | grep '^beacon_head_slot'
+```
+
+## Set up Prometheus and Grafana
+
+<Steps>
+
+1. **Create the files.** In a new folder (for example `~/monitoring`), create this layout:
+
+   ```text
+   monitoring/
+   ├── docker-compose.yml
+   ├── prometheus.yml
+   ├── prysm-alerts.yml
+   └── grafana/
+       ├── dashboards/
+       └── provisioning/
+           ├── dashboards/prysm.yml
+           └── datasources/prometheus.yml
+   ```
+
+   {/* Image tags verified on Docker Hub, 2026-09: prom/prometheus v3.15.0, grafana/grafana 13.2.2. */}
+
+   ```yaml title="docker-compose.yml"
+   services:
+     prometheus:
+       image: prom/prometheus:v3.15.0
+       network_mode: host
+       restart: unless-stopped
+       command:
+         - --config.file=/etc/prometheus/prometheus.yml
+         - --web.listen-address=127.0.0.1:9090
+       volumes:
+         - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+         - ./prysm-alerts.yml:/etc/prometheus/prysm-alerts.yml:ro
+         - prometheus-data:/prometheus
+
+     grafana:
+       image: grafana/grafana:13.2.2
+       network_mode: host
+       restart: unless-stopped
+       environment:
+         - GF_SERVER_HTTP_ADDR=127.0.0.1
+       volumes:
+         - ./grafana/provisioning:/etc/grafana/provisioning:ro
+         - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+         - grafana-data:/var/lib/grafana
+
+   volumes:
+     prometheus-data:
+     grafana-data:
+   ```
+
+   Keep the job names exactly as written: the Prysm dashboards filter on `job="beacon node"` and `job="validator"`.
+
+   ```yaml title="prometheus.yml"
+   global:
+     scrape_interval: 15s
+     evaluation_interval: 15s
+
+   rule_files:
+     - prysm-alerts.yml
+
+   scrape_configs:
+     - job_name: 'beacon node'
+       static_configs:
+         - targets: ['127.0.0.1:8080']
+     - job_name: 'validator'
+       static_configs:
+         - targets: ['127.0.0.1:8081']
+   ```
+
+   ```yaml title="grafana/provisioning/datasources/prometheus.yml"
+   apiVersion: 1
+   datasources:
+     - name: Prometheus
+       type: prometheus
+       url: http://127.0.0.1:9090
+       isDefault: true
+   ```
+
+   ```yaml title="grafana/provisioning/dashboards/prysm.yml"
+   apiVersion: 1
+   providers:
+     - name: prysm
+       type: file
+       options:
+         path: /var/lib/grafana/dashboards
+   ```
+
+   Create `prysm-alerts.yml` from [Alert rules](#alert-rules) below.
+
+   :::note
+   `network_mode: host` lets the containers reach Prysm on `127.0.0.1` and only works on Linux. With Docker Desktop (macOS, Windows), remove `network_mode`, the `--web.listen-address` line and `GF_SERVER_HTTP_ADDR`, publish `127.0.0.1:9090:9090` and `127.0.0.1:3000:3000`, and use `host.docker.internal` instead of `127.0.0.1` in `prometheus.yml` targets; the Prometheus data source URL becomes `http://prometheus:9090`.
+   :::
+
+2. **Add a Prysm dashboard.** Download one of these into `grafana/dashboards/`:
+
+   - [Dashboard for a few validator keys](pathname:///docs/assets/grafana-dashboards/small_amount_validators.json): per-key panels.
+   - [Dashboard for more than ten keys](pathname:///docs/assets/grafana-dashboards/big_amount_validators.json): aggregated panels.
+
+   Fiat earnings panels need a price exporter that Prysm doesn't provide; they stay empty otherwise.
+
+3. **Start the stack.**
+
+   ```bash
+   docker compose up -d
+   ```
+
+4. **Log in to Grafana** at `http://127.0.0.1:3000` (user `admin`, password `admin`; Grafana asks you to change it). The Prysm dashboard is under **Dashboards**.
+
+</Steps>
+
+![Grafana dashboard for a Prysm node and validator](/images/dashboard_overview.png)
+
+To reach Grafana from your laptop, use an SSH tunnel (`ssh -N -L 3000:127.0.0.1:3000 <USER>@<NODE_HOST>`) instead of opening the port. See the [Security checklist](/security/).
+
+## Check that it works
+
+Open `http://127.0.0.1:9090/targets` (through the tunnel if needed). Both `beacon node` and `validator` must show `UP`. The dashboard's slot and peer panels then fill within a minute.
+
+## Alert rules
+
+These five alerts catch the failures that cost you rewards. Save them as `prysm-alerts.yml` and tune the thresholds.
+
+{/* Metric names verified in Prysm source: beacon-chain/blockchain/metrics.go, beacon-chain/p2p/monitoring.go, beacon-chain/execution/prometheus.go, validator/client/metrics.go. */}
+
+```yaml title="prysm-alerts.yml"
+groups:
+  - name: prysm
+    rules:
+      - alert: PrysmDown
+        expr: up{job=~"beacon node|validator"} == 0
+        for: 2m
+        annotations:
+          summary: "{{ $labels.job }} is not responding"
+
+      - alert: BeaconNodeBehind
+        expr: (beacon_clock_time_slot - beacon_head_slot) > 8
+        for: 5m
+        annotations:
+          summary: "Beacon node is {{ $value }} slots behind"
+
+      - alert: LowPeers
+        expr: p2p_peer_count{state="Connected"} < 20
+        for: 10m
+        annotations:
+          summary: "Only {{ $value }} connected peers"
+
+      - alert: ExecutionClientDisconnected
+        expr: powchain_sync_eth1_connected == 0
+        for: 2m
+        annotations:
+          summary: "Beacon node lost its execution client"
+
+      - alert: MissedAttestations
+        expr: validator_correctly_voted_target == 0 and on(pubkey) validator_statuses == 3
+        for: 15m
+        annotations:
+          summary: "Active validator {{ $labels.pubkey }} is missing target votes"
+```
+
+| Metric | What it tells you |
+| --- | --- |
+| `beacon_head_slot`, `beacon_clock_time_slot` | Head slot and current slot. The difference is how far behind you are. |
+| `p2p_peer_count{state="Connected"}` | Connected peers. |
+| `powchain_sync_eth1_connected` | `1` when the execution client is connected. |
+| `validator_correctly_voted_target` | `1` if the key's last target vote was correct and included. Per key (`pubkey` label). |
+| `validator_statuses` | Status per key; `3` is active. |
+
+To get notified by email, Telegram or Discord, send the alerts through [Alertmanager](https://prometheus.io/docs/alerting/latest/alertmanager/) or Grafana alerting. Also alert on free disk space and on the machine being reachable, with [node_exporter](https://github.com/prometheus/node_exporter) or your provider's monitoring: a full disk is a common cause of a stopped node.
+
+<Aside type="caution" title="Many keys">
+<Flag name="disable-account-metrics" bin="validator" /> turns off every per-key `validator_*` metric, so the `MissedAttestations` alert and the dashboards' validator panels go quiet. Use the beacon node's [validator monitor](/operate/validator-monitoring/) instead.
+</Aside>
+
+## Logging
+
+The same flags exist on `beacon-chain` and `validator`:
+
+| Flag | Default | Use it to |
+| --- | --- | --- |
+| <Flag name="verbosity" /> | `info` | Show more (`debug`) or less (`warn`, `error`). |
+| <Flag name="log-file" /> | none | Also write logs to a file. It never rotates; pair it with logrotate. |
+| <Flag name="log-format" /> | `text` | Use `json` for log shippers such as Loki or Elasticsearch. |
+
+Under systemd, the journal already captures the logs: `journalctl -fu beacon`. Whatever <Flag name="verbosity" /> says, each process also keeps a 24-hour debug log in `<datadir>/logs/`, which is the file to attach to a bug report.
+
+## Next steps
+
+- [Track validator performance](/operate/validator-monitoring/)
+- [Is my node healthy?](/operate/check-health/)
+- [Fix common problems](/operate/troubleshooting/)

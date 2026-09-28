@@ -1,0 +1,196 @@
+---
+title: Several validator clients, one beacon node
+description: Run two or more Prysm validator clients against one beacon node, each with its own keys, wallet, data directory, ports and fee recipient, without risking slashing.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+One beacon node can serve several Prysm validator clients. Each validator client runs its own set of keys with its own wallet, slashing protection database, fee recipient and ports. Use this when key sets must stay separate: keys that belong to different people or entities, keys with different fee recipients or MEV policies, or keys you want to restart, update or migrate independently.
+
+If all your keys belong to you and share one fee recipient, you don't need this: one validator client handles many keys, and per-key fee recipients go in a [proposer settings file](/validators/fee-recipient/).
+
+<TopologyDiagram variant="multi-vc" />
+
+<Aside type="danger" title="Never load the same key in two validator clients">
+Two validator clients with the same key sign conflicting messages, and that is a slashable offense. Their slashing protection databases are separate, so neither can stop the other. This applies across machines too. Before you move a key from one validator client to another, stop the first one, remove the key from it, and [export and import its slashing protection history](/validators/slashing-protection/). See [Avoid slashing](/security/avoid-slashing/).
+</Aside>
+
+## Before you begin
+
+- A synced beacon node and execution client. See [Node and validator on one machine](/setup/topologies/single-machine/) or [Beacon node only](/setup/topologies/beacon-node-only/).
+- Validator keystores, split into one directory per validator client. See [Create validator keys](/validators/create-keys/).
+- The [service layout](/setup/systemd/) for binaries and data, if you run Prysm as a service. This page uses it.
+
+## What each validator client needs
+
+Everything that holds state or listens on a port must be unique per validator client.
+
+| Setting | Flag | Validator client A | Validator client B |
+| --- | --- | --- | --- |
+| Wallet (keys) | <Flag name="wallet-dir" bin="validator" /> | `/var/lib/ethereum/validator-a/wallet` | `/var/lib/ethereum/validator-b/wallet` |
+| Wallet password | <Flag name="wallet-password-file" bin="validator" /> | `/var/lib/ethereum/validator-a/password.txt` | `/var/lib/ethereum/validator-b/password.txt` |
+| Data (slashing protection DB) | <Flag name="datadir" bin="validator" /> | `/var/lib/ethereum/validator-a` | `/var/lib/ethereum/validator-b` |
+| HTTP server (Keymanager API) | <Flag name="http-port" bin="validator" /> | `7500` (default) | `7501` |
+| Metrics | <Flag name="monitoring-port" bin="validator" /> | `8081` (default) | `8082` |
+| Fee recipient | <Flag name="suggested-fee-recipient" bin="validator" /> | owner A's address | owner B's address |
+
+A few notes:
+
+- The HTTP server only starts with <Flag name="rpc" bin="validator" /> or <Flag name="web" bin="validator" />. Give every validator client a distinct <Flag name="http-port" bin="validator" /> anyway, so enabling it later can't clash.
+- <Flag name="rpc-port" bin="validator" /> exists but the current validator client doesn't open it, so it needs no unique value.
+- If you use the [pprof profiler](/developers/debugging/), <Flag name="pprofport" bin="validator" /> must be unique too.
+- The validator client's slashing protection database is `validator.db` in <Flag name="datadir" bin="validator" />. Sharing a data directory between validator clients corrupts that protection; never do it.
+
+## Point each validator client at the beacon node
+
+All validator clients use the same beacon node endpoint. Pick one transport per validator client:
+
+| Transport | Validator client flag | Beacon node side |
+| --- | --- | --- |
+| gRPC (default) | <Flag name="beacon-rpc-provider" bin="validator" />, default `127.0.0.1:4000` | <Flag name="rpc-host" /> and <Flag name="rpc-port" /> |
+| Beacon API (REST) | <Flag name="beacon-rest-api-provider" bin="validator" />, default `http://127.0.0.1:3500` | <Flag name="http-host" /> and <Flag name="http-port" /> |
+
+On one machine, the defaults already match. For validator clients on other hosts, bind the beacon node's port to a private interface as described in [Serve remote validator clients](/setup/topologies/beacon-node-only/#serve-remote-validator-clients).
+
+## Set up the validator clients
+
+This example runs two validator clients, `a` and `b`, as one systemd template unit. Each instance runs as its own system user, so one owner's process can't read another's keys.
+
+<Steps>
+
+1. **Create a user and directories per validator client.**
+
+	```bash
+	for id in a b; do
+	  sudo useradd --system --no-create-home --shell /usr/sbin/nologin validator-$id
+	  sudo mkdir -p /var/lib/ethereum/validator-$id
+	  sudo chown validator-$id:validator-$id /var/lib/ethereum/validator-$id
+	  sudo chmod 700 /var/lib/ethereum/validator-$id
+	done
+	```
+
+2. **Import each key set into its own wallet.** Run the import once per validator client, with that client's keystore directory and wallet:
+
+	```bash
+	sudo -u validator-a validator accounts import \
+	  --hoodi \
+	  --keys-dir=<PATH_TO_KEYS_FOR_A> \
+	  --wallet-dir=/var/lib/ethereum/validator-a/wallet \
+	  --accept-terms-of-use
+	```
+
+	Repeat for `b` with its own keys and wallet. Then write each wallet password to that client's `password.txt`, owned by its user with mode `600`. The details are in [Import keys into Prysm](/validators/import-keys/).
+
+3. **Write one environment file per validator client.**
+
+	```ini title="/etc/ethereum/validator-a.env"
+	HTTP_PORT=7500
+	MONITORING_PORT=8081
+	FEE_RECIPIENT=<FEE_RECIPIENT_FOR_A>
+	```
+
+	```ini title="/etc/ethereum/validator-b.env"
+	HTTP_PORT=7501
+	MONITORING_PORT=8082
+	FEE_RECIPIENT=<FEE_RECIPIENT_FOR_B>
+	```
+
+	Replace the placeholders with each owner's execution address.
+
+4. **Create the template unit.** `%i` is the instance name (`a` or `b`).
+
+	```ini title="/etc/systemd/system/validator@.service"
+	[Unit]
+	Description=Prysm validator client %i
+	Wants=network-online.target
+	After=network-online.target beacon.service
+
+	[Service]
+	User=validator-%i
+	Group=validator-%i
+	EnvironmentFile=/etc/ethereum/validator-%i.env
+	ExecStart=/usr/local/bin/validator \
+	  --hoodi \
+	  --accept-terms-of-use \
+	  --beacon-rpc-provider=127.0.0.1:4000 \
+	  --datadir=/var/lib/ethereum/validator-%i \
+	  --wallet-dir=/var/lib/ethereum/validator-%i/wallet \
+	  --wallet-password-file=/var/lib/ethereum/validator-%i/password.txt \
+	  --http-port=${HTTP_PORT} \
+	  --monitoring-port=${MONITORING_PORT} \
+	  --suggested-fee-recipient=${FEE_RECIPIENT}
+	Restart=always
+	RestartSec=5
+
+	[Install]
+	WantedBy=multi-user.target
+	```
+
+	Swap `--hoodi` for `--mainnet` on mainnet. `beacon.service` is the beacon node unit from [Run with systemd](/setup/systemd/).
+
+5. **Start both instances.**
+
+	```bash
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now validator@a validator@b
+	```
+
+</Steps>
+
+To use Docker Compose instead, give each validator client its own service with its own volume and the same flags. Only publish the ports you actually scrape or call.
+
+## Check that it works
+
+1. **Each validator client loaded only its own keys.** Compare the key count and public keys in each client's startup log with what you imported:
+
+	```bash
+	journalctl -u validator@a -n 100 --no-pager
+	journalctl -u validator@b -n 100 --no-pager
+	```
+
+2. **No key appears twice.** List the keys of every wallet and compare them. This command prints nothing if the wallets are disjoint:
+
+	```bash
+	for id in a b; do
+	  sudo -u validator-$id validator accounts list \
+	    --wallet-dir=/var/lib/ethereum/validator-$id/wallet \
+	    --wallet-password-file=/var/lib/ethereum/validator-$id/password.txt \
+	    --accept-terms-of-use | grep -Eo '0x[0-9a-f]{96}'
+	done | sort | uniq -d
+	```
+
+3. **Each metrics endpoint answers on its own port.**
+
+	```bash
+	curl -s http://127.0.0.1:8081/metrics | head -n 3
+	curl -s http://127.0.0.1:8082/metrics | head -n 3
+	```
+
+## Beacon node load
+
+One beacon node handles many validators, but each validator client adds work:
+
+- **Attestation subnets.** When a validator is selected as an aggregator, the beacon node subscribes to that attestation subnet and collects attestations to aggregate. More validators mean more subnets and more gossip traffic, whichever validator client they come from.
+- **Data column custody.** Since PeerDAS, a beacon node with validators attached custodies more data columns, scaled by the total effective balance of all its validators across every validator client. More stake means more bandwidth and storage. See [Blobs and PeerDAS](/learn/blobs-and-peerdas/).
+- **Requests at slot boundaries.** Every validator client asks for duties and submits attestations at the same moments. On slow hardware this shows up as late attestations. Watch the beacon node's CPU and response times in [Metrics and dashboards](/operate/metrics/).
+- **A shared point of failure.** If the beacon node or its execution client goes down, every validator client stops performing duties. Keep a spare beacon node ready. <Flag name="beacon-rest-api-provider" bin="validator" /> accepts several comma-separated beacon nodes: the validator client queries all of them and keeps the best response, so one node can fail without stopping duties.
+
+## Troubleshooting
+
+**`address already in use` on startup.**
+Two validator clients have the same <Flag name="http-port" bin="validator" />, <Flag name="monitoring-port" bin="validator" /> or <Flag name="pprofport" bin="validator" />. Give each a unique value.
+
+**A validator client reports keys you didn't expect.**
+It's reading another client's wallet. Check <Flag name="wallet-dir" bin="validator" /> in its unit and environment file. Stop it before it signs anything with keys that another client also runs.
+
+**Blocks from one owner pay the wrong fee recipient.**
+Check <Flag name="suggested-fee-recipient" bin="validator" /> or the proposer settings file of the validator client that holds that key. The beacon node's own <Flag name="suggested-fee-recipient" /> is only a fallback. See [Fee recipient and proposer settings](/validators/fee-recipient/).
+
+## Next steps
+
+- [Avoid slashing](/security/avoid-slashing/)
+- [Fee recipient and proposer settings](/validators/fee-recipient/)
+- [Monitor specific validators](/operate/validator-monitoring/)
+- [Validator client flags](/flags/validator/)

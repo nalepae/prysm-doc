@@ -1,0 +1,155 @@
+---
+title: Storage, pruning and archive nodes
+description: What the Prysm beacon node stores on disk, how to limit it with pruning and retention flags, how to run an archive node, move the data directory, and recover from a full disk.
+---
+
+import { Aside, Steps, FileTree } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A Prysm beacon node stores the chain in a BoltDB database, and blob and data column sidecars as files next to it. How much disk you need depends on how you synced, how long you keep history, and how much data column custody your node has. This page shows where the space goes and how to control it.
+
+For hardware sizing, see [System requirements](/get-started/system-requirements/). The execution client needs far more disk than the beacon node; check its own documentation.
+
+## What's on disk
+
+Everything lives under <Flag name="datadir" /> unless you move parts of it:
+
+<FileTree>
+- datadir/
+  - beaconchaindata/
+    - beaconchain.db blocks, states, fork choice and everything else
+    - slasher.db only with `--slasher` and no `--slasher-datadir`
+  - blobs/ blob sidecars (before Fulu)
+  - data-columns/ data column sidecars (from Fulu, PeerDAS)
+  - logs/
+    - beacon-chain.log 24-hour debug log, rotated at 250 MB
+</FileTree>
+
+Measure it:
+
+```bash
+du -sh <DATADIR>/beaconchaindata <DATADIR>/blobs <DATADIR>/data-columns
+```
+
+The metrics `blob_disk_bytes`, `blob_disk_count` and `data_column_disk_count` give the same picture in Prometheus; see [Metrics](/operate/metrics/).
+
+### What makes it grow
+
+| Factor | Effect | Controlled by |
+| --- | --- | --- |
+| Sync method | A [checkpoint-synced](/setup/checkpoint-sync/) node only has blocks from its checkpoint onward; a genesis-synced node has everything. | <Flag name="checkpoint-sync-url" />, <Flag name="enable-backfill" /> |
+| Block history | Without pruning, blocks accumulate forever. | <Flag name="beacon-db-pruning" /> |
+| Archived states | One full state is kept every <Flag name="slots-per-archive-point" /> slots (default 2048). Lower values mean more states. | <Flag name="slots-per-archive-point" /> |
+| Blob and data column retention | Kept for 4096 epochs (about 18 days) by default, then pruned automatically. | <Flag name="blob-retention-epochs" /> |
+| Data column custody | A regular node stores only the columns it custodies; more validators on the node means more custody. A supernode stores all columns. | <Flag name="supernode" />, <Flag name="semi-supernode" /> |
+| Slasher | Adds a large, fast-growing database. | <Flag name="slasher" />, see [Run a slasher](/operate/slasher/) |
+
+See [Blobs and PeerDAS](/learn/blobs-and-peerdas/) for why blob data is stored and how custody works.
+
+## Keep the database small
+
+For a staking node that doesn't need to serve old data:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+  --beacon-db-pruning
+```
+
+- **Checkpoint sync** starts the database at a recent finalized state instead of genesis.
+- <Flag name="beacon-db-pruning" /> deletes blocks and states older than the spec minimum the network expects you to serve (`MIN_EPOCHS_FOR_BLOCK_REQUESTS`, 33,024 epochs, about 5 months). <Flag name="pruner-retention-epochs" /> can keep more; values below the minimum are ignored.
+- Leave <Flag name="enable-backfill" /> off unless you want the block history back to that 5-month window (or further, with <Flag name="backfill-oldest-slot" />).
+
+<Aside type="note">
+Pruning frees pages inside `beaconchain.db`, which the database reuses, but the file on disk doesn't shrink. To get the space back on an old, large database, resync from scratch with pruning enabled (see [Resync from scratch](#resync-from-scratch)).
+</Aside>
+
+Blobs and data columns are pruned automatically after <Flag name="blob-retention-epochs" /> (default 4096, the protocol minimum). You can raise the value, but not lower it: the node refuses to start with less than 4096. The same flag applies to data columns.
+
+## Run an archive node
+
+An archive node answers Beacon API queries about any past slot quickly, for explorers, indexers and research. It needs:
+
+1. **All blocks.** Sync from genesis (omit <Flag name="checkpoint-sync-url" />), or checkpoint sync with <Flag name="enable-backfill" /> and `--backfill-oldest-slot=0` to download blocks back to genesis. Backfill restores blocks only; to also have historical *states* before your checkpoint, sync from genesis.
+2. **No pruning.** Don't set <Flag name="beacon-db-pruning" />.
+3. **More archived states.** Prysm rebuilds a historical state by loading the closest archived state before it and replaying blocks. With the default 2048 slots between archived states, that can mean replaying up to 2047 blocks per query. Set a lower value **before you sync**, since it only affects states archived from then on:
+
+   ```bash
+   ./prysm.sh beacon-chain \
+     --mainnet \
+     --slots-per-archive-point=32
+   ```
+
+   `32` keeps one state per epoch: fast historical queries, at the cost of far more disk. Choose a power of two that balances query speed and space.
+4. **Longer blob retention, optionally.** If you serve blob data, raise <Flag name="blob-retention-epochs" />, and run as a <Flag name="supernode" /> to keep every data column (<Flag name="semi-supernode" /> keeps enough to serve the blob API).
+
+### State diffs (experimental)
+
+<Flag name="enable-state-diff" /> switches historical state storage to a hierarchical diff scheme, configured by <Flag name="state-diff-exponents" />. It is **experimental** and has constraints:
+
+- It only works on a **new** database. On an existing database without state-diff data, the node logs `Disabling state-diff feature` and continues without it.
+- The exponents are fixed when the database is created. Starting later with different exponents aborts with a configuration mismatch; use the stored values or resync.
+
+Don't use it for production archive nodes until it's no longer marked experimental.
+
+## Move the data directory
+
+Use this to move to a bigger disk.
+
+<Steps>
+
+1. Stop the beacon node (and the validator, if it uses the same disk).
+2. Copy the whole data directory, preserving ownership and permissions:
+
+   ```bash
+   sudo rsync -a <OLD_DATADIR>/ <NEW_DATADIR>/
+   ```
+
+3. Point the beacon node at the new location with <Flag name="datadir" />, in its command line, config file or service unit. If you had set <Flag name="blob-path" /> or <Flag name="data-column-path" />, update those too.
+4. Start the beacon node and check the `Checking DB` log line shows the new `databasePath`, then that it syncs to head. See [check health](/operate/check-health/).
+5. Delete the old copy once the node has run correctly for a while.
+
+</Steps>
+
+You can also keep the database on one disk and blob data on another with <Flag name="blob-path" /> and <Flag name="data-column-path" />.
+
+## If the disk fills up
+
+When the disk is full, the beacon node can't write and stops following the chain; a crash in the middle of a write can leave the database corrupted.
+
+1. **Stop the beacon node.**
+2. **Free space.** Common culprits: the execution client's database, old log files (`--log-file` outputs aren't rotated by Prysm), Docker images and build caches, and old database copies or backups on the same disk.
+3. **Start the beacon node** and watch the logs. If it starts and syncs, you're done; set up a disk space alert (see [Metrics](/operate/metrics/#alert-rules)).
+4. **If it fails to start** with database errors (for example `could not get ancestor state` or unmarshalling errors), resync from scratch.
+
+## Resync from scratch
+
+Resyncing the beacon node doesn't touch your validator keys or slashing protection; the validator simply can't attest until the beacon node is back. With checkpoint sync it usually takes minutes.
+
+<Steps>
+
+1. Stop the beacon node.
+2. Start it once with <Flag name="force-clear-db" />, plus your usual flags and a <Flag name="checkpoint-sync-url" />. It deletes the beacon database, blob storage and data column storage (and the slasher database, with `--slasher`) before starting:
+
+   ```bash
+   ./prysm.sh beacon-chain \
+     --hoodi \
+     --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+     --force-clear-db
+   ```
+
+   <Flag name="clear-db" /> does the same but asks for confirmation first.
+3. Remove `--force-clear-db` from your command line or service before the next restart, or the node will wipe itself every time.
+
+</Steps>
+
+<Aside type="caution">
+The validator client has its own <Flag name="clear-db" bin="validator" /> and <Flag name="force-clear-db" bin="validator" /> flags. On the validator they delete the **slashing protection database**. Don't use them there unless you know exactly why.
+</Aside>
+
+## Next steps
+
+- [Sync and storage flags](/flags/sync-and-storage/)
+- [Checkpoint sync](/setup/checkpoint-sync/)
+- [Back up and restore](/operate/backup-and-restore/)

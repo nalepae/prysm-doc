@@ -1,0 +1,130 @@
+---
+title: Verify your download
+description: Check that the Prysm binaries you downloaded are the ones Prysm released, using their SHA-256 checksums and GPG signatures, and pin Docker images by digest.
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+Your node runs software that can sign with your validator keys. Before you run a Prysm binary, check that it's the file Prysm's maintainers released and that nobody changed it on the way. If you use `prysm.sh` on Linux or macOS, it does this for you on every start; read [What prysm.sh checks](#what-prysmsh-checks) and you're done.
+
+Each [GitHub release](https://github.com/OffchainLabs/prysm/releases) has, for every binary, a `.sha256` file with its checksum and a `.sig` file with its GPG signature. Releases are signed with this key:
+
+```text
+0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+```
+
+The same fingerprint is in [`prysm.sh`](https://github.com/OffchainLabs/prysm/blob/develop/prysm.sh) and in the Prysm [security.txt](https://github.com/OffchainLabs/prysm/blob/develop/.well-known/security.txt). Compare it with at least one of them rather than trusting this page alone.
+
+## Verify a release binary
+
+<Tabs syncKey="os">
+<TabItem label="Linux, macOS">
+
+You need `gpg` (on macOS: `brew install gnupg`). Run these in the folder with the binary and its `.sha256` and `.sig` files, as downloaded in [Install Prysm](/install/).
+
+<Steps>
+
+1. Check the checksums (on macOS, use `shasum -a 256 -c`):
+
+   ```bash
+   sha256sum -c *.sha256
+   ```
+
+   Every file must report `OK`.
+
+2. Import the signing key and check its fingerprint:
+
+   ```bash
+   curl -fsSL https://prysmaticlabs.com/releases/pgp_keys.asc | gpg --import
+   gpg --fingerprint 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   ```
+
+   The printed fingerprint must match the one above exactly.
+
+3. Check the signatures:
+
+   ```bash
+   for SIG in *.sig; do gpg --verify "$SIG" "${SIG%.sig}"; done
+   ```
+
+</Steps>
+
+</TabItem>
+<TabItem label="Windows">
+
+<Steps>
+
+1. Check the checksum in PowerShell, and compare the hash with the first word of the `.sha256` file:
+
+   ```powershell
+   Get-FileHash .\beacon-chain-<VERSION>-windows-amd64.exe -Algorithm SHA256
+   Get-Content .\beacon-chain-<VERSION>-windows-amd64.exe.sha256
+   ```
+
+   Replace `<VERSION>` with the release, for example <PrysmVersion />. The two hashes must be the same (case doesn't matter).
+
+{/* VERIFY: Windows gpg commands follow Gpg4win's gpg.exe usage; not run on a Windows machine. */}
+
+2. Install [Gpg4win](https://www.gpg4win.org/), then import the key and check the signature in a new PowerShell window:
+
+   ```powershell
+   curl.exe -fsSL https://prysmaticlabs.com/releases/pgp_keys.asc -o pgp_keys.asc
+   gpg --import pgp_keys.asc
+   gpg --verify .\beacon-chain-<VERSION>-windows-amd64.exe.sig .\beacon-chain-<VERSION>-windows-amd64.exe
+   ```
+
+</Steps>
+
+</TabItem>
+</Tabs>
+
+## Check that it works
+
+For each file, gpg prints something like:
+
+```text
+gpg:                using RSA key 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+gpg: Good signature from "Preston Van Loon <preston@pvl.dev>" [unknown]
+gpg: WARNING: This key is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: 0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+```
+
+You need both `Good signature` **and** the fingerprint above. The `WARNING` is expected: it only means you haven't signed the key yourself. `gpg --verify` accepts a good signature from any key in your keyring, so a good signature from a different key is not a valid Prysm release.
+
+If you see `BAD signature`, a different fingerprint, or a checksum that doesn't match, stop. Don't run the file. Download it again from the GitHub release page and, if it still fails, ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP).
+
+## What prysm.sh checks
+
+On Linux and macOS, `prysm.sh` downloads each binary with its `.sha256` and `.sig`, checks both, and imports the signing key the first time. On success it prints `Verified ... has been signed by Prysmatic Labs.` If a check fails, it stops with `Failed to verify Prysm binary.`
+
+Know the limits:
+
+- The binary, checksum, signature and key all come from the same server. The checks catch corrupted or tampered downloads, not a compromised server. Importing and checking the key yourself first (step 2 above) closes most of that gap.
+- `prysm.bat` and `prysm.ps1` on Windows check only the checksum, not the signature. Verify with Gpg4win if you want the stronger check.
+- Never set `PRYSM_ALLOW_UNVERIFIED_BINARIES=1` on a validator. It turns every check off.
+
+## Docker images
+
+Prysm's Docker images aren't signed. To make sure you always run the image you chose:
+
+- Use a release tag such as <PrysmVersion />, never `latest`.
+- Pin the image by digest after you pull it. A digest names the exact image content and can't be moved like a tag:
+
+  ```bash
+  docker pull gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>
+  docker inspect --format '{{index .RepoDigests 0}}' gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>
+  ```
+
+  Then refer to it as `gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>@sha256:<DIGEST>` in `docker run` or `docker-compose.yml`.
+
+## The rest of your stack
+
+Apply the same care to the other software next to Prysm: your execution client, MEV-Boost, any remote signer, and the deposit CLI you use to create keys. Download each from its official release page and follow that project's own verification steps.
+
+## Next steps
+
+- [Install Prysm](/install/)
+- [Update and roll back](/install/update/)
+- [Security checklist](/security/)

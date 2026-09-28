@@ -1,0 +1,125 @@
+---
+title: Checkpoint sync
+description: Start a new Prysm beacon node from a recent finalized checkpoint so it follows the chain within minutes, then check the checkpoint against a second source.
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Without checkpoint sync, a new beacon node replays every block since 2020, which takes days on mainnet. With it, the node downloads a recent finalized state from a beacon node you trust and follows the chain within minutes. Because you trust that source for your starting point, you check it afterwards against a second, independent one.
+
+## Before you begin
+
+- A beacon node with an **empty** data directory. Checkpoint sync only applies to a fresh database.
+- A connected execution client. See [Connect your execution client](/setup/connect-execution-client/).
+
+## Sync from a checkpoint
+
+<Steps>
+
+1. **Pick a provider.** Use your own synced beacon node, or a public endpoint from the community [checkpoint sync endpoints list](https://eth-clients.github.io/checkpoint-sync-endpoints/). Pick one run by an organization you trust, and a different one for the check later on.
+
+2. **Add <Flag name="checkpoint-sync-url" /> to your beacon node command:**
+
+	<Tabs syncKey="network">
+	<TabItem label="Hoodi">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --hoodi \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+	```
+
+	</TabItem>
+	<TabItem label="Mainnet">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --mainnet \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+	```
+
+	</TabItem>
+	<TabItem label="Sepolia">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --sepolia \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+	```
+
+	</TabItem>
+	</Tabs>
+
+	{/* Endpoints checked against https://eth-clients.github.io/checkpoint-sync-endpoints/ and their /checkpointz/v1/status, 2026-09-28. */}
+
+	The same URL also provides the genesis state that Hoodi and Sepolia need. To use your own node as the source, pass its Beacon API address, for example `--checkpoint-sync-url=http://192.168.1.10:3500`.
+
+3. **Watch the logs.** A successful download looks like this:
+
+	```text
+	INFO node: Checkpoint sync - Downloading origin state and block
+	INFO checkpoint-sync: Downloaded checkpoint sync state and block. blockRoot=0x… blockSlot=… stateRoot=0x… stateSlot=…
+	```
+
+	You can leave the flag in place. On later restarts, the node finds its database, logs `Origin checkpoint found in the database, ignoring checkpoint sync flags`, and carries on from where it stopped.
+
+</Steps>
+
+## Verify the checkpoint
+
+A broken or malicious provider could hand you a state from the wrong chain. Once the node runs, compare its finalized checkpoint with a second provider that has nothing to do with the first.
+
+<Steps>
+
+1. Ask your node for its finalized checkpoint, and note `data.finalized.epoch` and `data.finalized.root`:
+
+	```bash
+	curl -s http://localhost:3500/eth/v1/beacon/states/head/finality_checkpoints
+	```
+
+2. Ask a second provider. Endpoints from the list above report their finalized epoch and root at `/checkpointz/v1/status`:
+
+	```bash
+	curl -s https://hoodi.checkpoint.sigp.io/checkpointz/v1/status
+	```
+
+	You can also open the epoch in a block explorer, for example `https://hoodi.beaconcha.in/epoch/<EPOCH>` (`https://beaconcha.in/epoch/<EPOCH>` on mainnet).
+
+</Steps>
+
+For the same epoch, the roots must be identical. If the epochs differ, finality has just moved on: query both again. If the roots differ, stop your validator, delete the beacon node's data directory, and sync again from another provider.
+
+## Check that it works
+
+```bash
+curl -s http://localhost:3500/eth/v1/node/syncing
+```
+
+Right after the checkpoint sync, `head_slot` starts near the checkpoint slot and `sync_distance` drops quickly. When `is_syncing` is `false`, the node is following the chain, and the logs show a `Synced new block` line for every block. `is_optimistic: true` means the execution client is still syncing; your validators can't do their duties until it catches up.
+
+## Good to know
+
+- **No history before the checkpoint.** A checkpoint-synced node validates fine without old blocks. If you want them anyway, add <Flag name="enable-backfill" />; the node downloads them in the background once it's synced. See [Disk space and archive nodes](/setup/storage/).
+- **No internet access to a provider?** Download the checkpoint as files on another machine with `prysmctl checkpoint-sync download`, then start the node with <Flag name="checkpoint-state" /> and <Flag name="checkpoint-block" />. See the [prysmctl reference](/reference/cli/prysmctl/).
+- **Sync from genesis.** Leave out the checkpoint flags. It takes much longer, but trusts no provider. Hoodi and Sepolia then need <Flag name="genesis-state" />.
+
+## Troubleshooting
+
+**`Origin checkpoint found in the database, ignoring checkpoint sync flags`, but you wanted a fresh sync.**
+The data directory already holds a database. Stop the node and start it once with <Flag name="force-clear-db" />, or point <Flag name="datadir" /> at an empty directory.
+
+**`Error retrieving checkpoint origin state and block`, or a timeout.**
+The provider is down, rate-limited or unreachable. Try another one from the list.
+
+**The download worked but the node stays behind or has few peers.**
+Checkpoint sync only sets the starting point. Peers and sync speed depend on your [network setup](/setup/networking/).
+
+## Next steps
+
+- [Ports, peers and router setup](/setup/networking/)
+- [Run as a service](/setup/run-as-a-service/)
+- [Is my node healthy?](/operate/check-health/)

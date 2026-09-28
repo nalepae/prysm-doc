@@ -1,0 +1,192 @@
+---
+title: Glossary
+description: Plain definitions of the Ethereum staking and Prysm terms used in these docs, from attestation to withdrawal sweep.
+toc_max_heading_level: 2
+---
+
+import Flag from '@site/src/components/Flag';
+
+Short definitions of the terms you meet in these docs. For the bigger picture, read [How staking works](/learn/how-staking-works/) and [Keys and withdrawal credentials](/learn/keys-and-withdrawals/).
+
+## A
+
+### Archive node
+A beacon node that keeps historical states so it can answer queries about the past quickly. It needs much more disk. See [Disk space and archive nodes](/setup/storage/).
+
+### Attestation
+A validator's vote, signed once per epoch, on the head of the chain and on recent checkpoints. Attestations make up most of a validator's rewards.
+
+## B
+
+### Backfill
+Downloading blocks older than a node's checkpoint-sync starting point, in the background. Turned on with <Flag name="enable-backfill" />.
+
+### Beacon API
+The standard REST API every consensus client serves, on port 3500 in Prysm. Validator clients, dashboards and scripts use it. See [APIs](/reference/apis/).
+
+### Beacon chain
+The proof-of-stake chain that coordinates validators and decides which execution blocks are part of the chain.
+
+### Beacon node
+The consensus client process, `beacon-chain` in Prysm. It follows the beacon chain, talks to other nodes, drives your execution client and serves your validator client.
+
+### Blob
+A block of data attached to a transaction, used mainly by rollups and kept for about 18 days. Blobs are the main reason a beacon node's disk and bandwidth needs vary.
+
+### BLS-to-execution change
+A one-time message, signed with a key derived from your mnemonic, that converts `0x00` withdrawal credentials to `0x01` with a withdrawal address you choose. It can't be undone.
+
+### Builder, relay
+A **builder** assembles blocks and bids to have a proposer use them. A **relay** passes bids between builders and proposers. You reach them through MEV-Boost.
+
+## C
+
+### Checkpoint sync
+Starting a beacon node from a recent finalized state downloaded from a node you trust, instead of from genesis. It takes minutes instead of days. See [Checkpoint sync](/setup/checkpoint-sync/).
+
+### Consensus client, consensus layer (CL)
+The software and protocol layer that runs proof of stake: the beacon node and the validator client. Prysm, Lighthouse, Teku, Nimbus, Lodestar and Grandine are consensus clients.
+
+### Consolidation
+Merging one validator's balance into another validator that has `0x02` credentials. The source validator exits. See [Withdrawals and consolidation](/validators/withdrawals/).
+
+## D
+
+### Deposit
+The ETH and signed deposit data you send to the deposit contract to create a validator or add to its balance. See [Make a deposit](/validators/deposit/).
+
+### Doppelganger protection
+An optional startup check in the validator client (<Flag name="enable-doppelganger" bin="validator" />, off by default). It looks for recent on-chain activity from your keys and refuses to start if it finds any. It reduces, but doesn't remove, the risk of running keys twice.
+
+## E
+
+### Effective balance
+The balance used to compute a validator's rewards and penalties: whole ETH, capped at 32 ETH, or 2,048 ETH with `0x02` credentials.
+
+### Engine API
+The authenticated connection between the beacon node and the execution client, on port 8551, secured with the JWT secret. See [Connect your execution client](/setup/connect-execution-client/).
+
+### Epoch
+32 slots, 6.4 minutes. Each active validator attests once per epoch.
+
+### Execution client, execution layer (EL)
+The software and protocol layer that runs transactions and keeps account and contract state: Geth, Nethermind, Besu, Erigon, Reth, Ethrex and others. A beacon node needs one.
+
+### Exit
+Leaving the active validator set for good. After an exit and a waiting period, the whole balance is paid to the withdrawal address. See [Exit a validator](/validators/exit/).
+
+## F
+
+### Fee recipient
+The execution address that receives priority fees and MEV payments from blocks your validator proposes. See [Set your fee recipient](/validators/fee-recipient/).
+
+### Finality, finalized
+A block is **finalized** once enough validators have voted for it, normally after about two epochs (13 minutes). A finalized block can't be reverted.
+
+### Fork (network upgrade)
+A scheduled protocol upgrade, such as Electra or Fulu. Every node must run a client version that supports it before it activates. See [Update and roll back](/install/update/).
+
+## G
+
+### Graffiti
+Up to 32 bytes of text your validator puts in blocks it proposes. See [Set graffiti](/validators/graffiti/).
+
+## H
+
+### Hoodi
+The public Ethereum testnet for practicing staking. Test ETH has no value. See [Try it on Hoodi first](/get-started/try-on-hoodi/).
+
+## I
+
+### Inactivity leak
+What happens when the chain can't finalize because more than a third of the stake is offline: offline validators lose balance faster and faster until finality returns. See [How staking works](/learn/how-staking-works/).
+
+## J
+
+### JWT secret
+A 32-byte hex secret shared by the beacon node and the execution client, used to authenticate the Engine API. Set in Prysm with <Flag name="jwt-secret" />.
+
+## K
+
+### Keymanager API
+The standard REST API for listing, importing and deleting keys in a running validator client. See [APIs](/reference/apis/).
+
+### Keystore
+A signing key encrypted with a password, in a standard JSON format (`keystore-m_….json`). It's what you import into a validator client.
+
+## M
+
+### MEV (maximal extractable value)
+Extra value a block producer can capture by choosing and ordering transactions. Builders pay proposers for it.
+
+### MEV-Boost
+A separate program that connects your beacon node to relays, so your validators can propose blocks built by builders. See [Use MEV-Boost](/validators/mev-boost/).
+
+### Mnemonic
+The 24-word seed phrase from which your validator keys are derived. Keep it offline. See [Keys and withdrawal credentials](/learn/keys-and-withdrawals/).
+
+## O
+
+### Optimistic sync
+Importing blocks before the execution client has checked them, while it is still syncing. Prysm doesn't perform validator duties while its head is optimistic.
+
+## P
+
+### Proposer, proposal
+The validator chosen at random to produce the block for a slot, and the act of producing it.
+
+### Proposer settings
+Prysm's per-validator settings for proposals, such as fee recipient, gas limit and builder options, from a file or URL. See [Set your fee recipient](/validators/fee-recipient/).
+
+## R
+
+### Remote signer
+A separate service, such as Web3Signer, that holds validator keys and signs on request, so the validator client never touches the keys. See [Use a remote signer](/validators/remote-signer/).
+
+## S
+
+### Slashing
+The penalty for signing contradictory messages, which in practice happens when the same keys run in two places. The validator loses part of its stake and is forced to exit. See [Avoid slashing](/validators/avoid-slashing/).
+
+### Slasher
+Software that watches the network for slashable messages and reports them. Optional; Prysm runs one with <Flag name="slasher" />.
+
+### Slashing protection
+A database in the validator client recording what each key has signed, so it never signs a conflicting message. Move it with your keys when you change machines or clients.
+
+### Slot
+A 12-second interval in which one validator may propose a block.
+
+### Supernode, semi-supernode
+A beacon node that stores all blob data (<Flag name="supernode" />) or enough to rebuild every blob (<Flag name="semi-supernode" />). Needed by some infrastructure that serves blob data; uses more disk and bandwidth.
+
+### Sync committee
+A group of 512 validators, replaced about every 27 hours, that signs the head block every slot. Being selected brings extra rewards.
+
+## V
+
+### Validator
+A participant in proof of stake with a staked balance, identified by a public key and a validator index. One validator client can run many validators.
+
+### Validator client
+The process that holds validator keys (or uses a remote signer), gets duties from a beacon node, and signs attestations and blocks. Prysm's is `validator`.
+
+### Validator index
+The number the beacon chain assigns to a validator when its deposit is processed. Explorers and most commands accept the index or the public key.
+
+## W
+
+### Wallet
+In Prysm, the directory where the validator client keeps its keys, set with <Flag name="wallet-dir" bin="validator" />.
+
+### Weak subjectivity
+A node starting from scratch needs a recent checkpoint from a source it trusts to be sure it's on the right chain. Checkpoint sync provides one.
+
+### Withdrawal address
+The execution address in `0x01` or `0x02` withdrawal credentials. It receives withdrawals and can request exits and consolidations.
+
+### Withdrawal credentials
+The part of a validator's on-chain record that says who controls its stake: `0x00` (a BLS key, no withdrawals), `0x01` (an execution address) or `0x02` (an execution address, compounding up to 2,048 ETH). See [Keys and withdrawal credentials](/learn/keys-and-withdrawals/).
+
+### Withdrawal sweep
+The automatic process that pays withdrawals. Each block pays the next validators in order, with no transaction or gas needed from you.

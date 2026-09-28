@@ -1,0 +1,98 @@
+---
+title: "Connect to beacon nodes"
+description: "Connect the Prysm validator client to one beacon node, on the same machine or another one, or to several beacon nodes: active-active with the Beacon API, active-passive with gRPC."
+---
+
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+The validator client gets its duties from a beacon node and sends it what it signs. By default it connects to one beacon node on the same machine, over gRPC at `127.0.0.1:4000`, so the start command from [Import keys](/validators/import-keys/) needs no extra flag. This page covers the other cases: a beacon node on another machine, the Beacon API instead of gRPC, and several beacon nodes.
+
+## Before you begin
+
+- Your keys are imported. See [Import keys](/validators/import-keys/).
+- Each beacon node you connect to is synced, runs its own execution client, and is on the same network as the validator client. See [Run a node](/get-started/quickstart/).
+
+## Choose gRPC or the Beacon API
+
+The validator client talks to the beacon node in one of two ways:
+
+| | gRPC | Beacon API (REST) |
+| --- | --- | --- |
+| Flag | <Flag name="beacon-rpc-provider" bin="validator" /> | <Flag name="beacon-rest-api-provider" bin="validator" /> |
+| Default address | `127.0.0.1:4000` | `http://127.0.0.1:3500` |
+| Used when | By default | You set <Flag name="beacon-rest-api-provider" bin="validator" />, or add <Flag name="enable-beacon-rest-api" bin="validator" /> |
+| Several beacon nodes | Active-passive: one in use, the others on standby | Active-active: all in use at once |
+
+gRPC stays the default and fully supported through Prysm v8, but it will eventually be removed in favor of the Beacon API. The Beacon API is also the standard API every consensus client serves.
+
+## One beacon node
+
+**On the same machine:** nothing to set. To use the Beacon API instead of gRPC, add <Flag name="enable-beacon-rest-api" bin="validator" />.
+
+**On another machine:** point the validator client at the beacon node's private IP, and make the beacon node listen on it with <Flag name="rpc-host" /> (gRPC) or <Flag name="http-host" /> (Beacon API), as in [Beacon node only](/setup/beacon-node-only/). Open port 4000 or 3500 in the firewall to the validator's host only.
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --wallet-dir=./wallet \
+  --wallet-password-file=./wallet-password.txt \
+  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+  --beacon-rest-api-provider=http://<BEACON_IP>:3500
+```
+
+For gRPC, use `--beacon-rpc-provider=<BEACON_IP>:4000` instead. Keep the two machines on the same local network: every duty waits on the beacon node.
+
+## Several beacon nodes
+
+Give the validator client a comma-separated list of beacon nodes so it keeps working while one of them is down, restarting or updating. Your keys still run in **one** validator client with one slashing protection database, so this adds no slashing risk. It is not the same as running your keys twice, which you must never do (see [Avoid slashing](/validators/avoid-slashing/)).
+
+The two APIs use the list differently: the Beacon API is **active-active** (all nodes are used at the same time), gRPC is **active-passive** (one node is used, the others wait as backups).
+
+<TopologyDiagram variant="several-bn" />
+
+### Beacon API: active-active
+
+The validator client uses all nodes at once:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --wallet-dir=./wallet \
+  --wallet-password-file=./wallet-password.txt \
+  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+  --beacon-rest-api-provider=http://<BEACON_1_IP>:3500,http://<BEACON_2_IP>:3500
+```
+
+- It listens to the event stream of every node, so it learns about a new block from whichever node sees it first.
+- It sends attestations, blocks and other signed messages to every node. A submission succeeds as soon as one node accepts it.
+- For time-critical data (what to attest to, the block to propose) it asks every node at once and takes the answer from a node that already has the newest block. If none catches up in time, it uses the first valid answer so the duty still happens.
+- Other requests go to the nodes in the order listed, until one answers.
+- It counts as healthy while at least one node is synced.
+
+### gRPC: active-passive
+
+The validator client uses one node at a time. With `--beacon-rpc-provider=<BEACON_1_IP>:4000,<BEACON_2_IP>:4000`, the validator client uses the first node. Every slot it checks that the current node is up and synced. If not, it moves to the next node in the list and stays there; it doesn't switch back when the first node recovers. A switch logs:
+
+```text
+WARN fallback: Switched to responsive beacon node current=<BEACON_2_IP>:4000 previous=<BEACON_1_IP>:4000 tried=[<BEACON_1_IP>:4000]
+```
+
+### Block production from Gloas on
+
+With either API, when the network has the Gloas fork scheduled, a list of two or more nodes also turns on <Flag name="stateless" bin="validator" />, because only the node that built a block can reveal its payload. The validator client logs `Multiple beacon nodes configured: enabling --stateless so block production works on every node`.
+
+## Check that it works
+
+At startup, the validator client logs how many beacon nodes it uses. With the Beacon API:
+
+```text
+INFO rest: Initialized REST connection provider count=2 endpoints=[http://<BEACON_1_IP>:3500 http://<BEACON_2_IP>:3500]
+```
+
+With gRPC, the line is `Initialized gRPC connection provider`, with the same fields. With one beacon node, `count=1`. Then watch for `Submitted new attestations` in the next epochs. With several nodes, stop one of them: the validator client keeps attesting.
+
+## Next steps
+
+- [Set your fee recipient](/validators/fee-recipient/)
+- [Make a deposit](/validators/deposit/)

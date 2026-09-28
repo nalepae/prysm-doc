@@ -1,0 +1,180 @@
+---
+title: Geth
+description: Install and configure Geth as the execution client for a Prysm beacon node on Hoodi, mainnet or Sepolia, and check that the two are connected.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Geth](https://geth.ethereum.org/docs) (go-ethereum) is the execution client written in Go and maintained by the Ethereum Foundation. It is the oldest and most widely run execution client, snap-syncs by default and stores state in a path-based scheme that prunes old state as it goes.
+
+Because so many validators run Geth, a Geth bug has a larger impact on the network than a bug in a smaller client. Running a less common client helps [client diversity](https://ethereum.org/developers/docs/nodes-and-clients/client-diversity/).
+
+{/* Verified against Geth v1.17.6 (flags from cmd/utils/flags.go at the v1.17.6 tag, docs at geth.ethereum.org), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://geth.ethereum.org/docs/getting-started/installing-geth). On Ubuntu, the PPA is the most common method:
+
+```bash
+sudo add-apt-repository -y ppa:ethereum/ethereum
+sudo apt-get update
+sudo apt-get install ethereum
+```
+
+On macOS, use Homebrew: `brew tap ethereum/ethereum` then `brew install ethereum`. Standalone binaries and the `ethereum/client-go` Docker image are listed on the [downloads page](https://geth.ethereum.org/downloads).
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Geth's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+geth \
+  --hoodi \
+  --datadir=$HOME/ethereum/execution \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.vhosts=localhost \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http \
+  --http.api=eth,net,web3
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+geth \
+  --mainnet \
+  --datadir=$HOME/ethereum/execution \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.vhosts=localhost \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http \
+  --http.api=eth,net,web3
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+geth \
+  --sepolia \
+  --datadir=$HOME/ethereum/execution \
+  --authrpc.addr=127.0.0.1 \
+  --authrpc.port=8551 \
+  --authrpc.vhosts=localhost \
+  --authrpc.jwtsecret=$HOME/ethereum/jwt.hex \
+  --http \
+  --http.api=eth,net,web3
+```
+
+</TabItem>
+</Tabs>
+
+`--authrpc.addr`, `--authrpc.port` and `--authrpc.vhosts` show the defaults; you can leave them out on a single machine. `--http` enables the regular JSON-RPC API on `127.0.0.1:8545`, which you use below to check sync status. If you run the binary from the `execution` folder instead of a package, call `./geth`.
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--port`, `--discovery.port`) | Yes, for more peers |
+| 8551 | TCP | Engine API (`--authrpc.port`) | No |
+| 8545 | TCP | JSON-RPC (`--http.port`) | No |
+| 6060 | TCP | Metrics, with `--metrics` (`--metrics.port`) | No |
+
+### Storage
+
+Keep the defaults for a staking node: snap sync (`--syncmode=snap`), full garbage collection (`--gcmode=full`), and the path-based state scheme. Geth keeps only recent state, so you don't need to prune state by hand.
+
+To save disk space, you can drop the chain history from before the Merge with `--history.chain=postmerge`, or prune it from an existing database with `geth prune-history` while Geth is stopped. A staking node doesn't need pre-merge history. See [History pruning](https://geth.ethereum.org/docs/fundamentals/historypruning). For current disk figures, see Geth's [hardware requirements](https://geth.ethereum.org/docs/getting-started/hardware-requirements).
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+Once Prysm is running, Geth stops warning about a missing beacon client. While Geth syncs, it logs fork-choice updates from Prysm:
+
+```text
+INFO [..] Forkchoice requested sync to new head    number=... hash=...
+```
+
+Once synced, it logs every payload Prysm sends it:
+
+```text
+INFO [..] Imported new potential chain segment     number=... hash=... blocks=1 txs=...
+```
+
+Ask Geth whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Geth is synced. While syncing, the result shows the current and highest block. You can also run `geth attach $HOME/ethereum/execution/geth.ipc` and call `eth.syncing`.
+
+## Troubleshooting
+
+**`Post-merge network, but no beacon client seen. Please launch one to follow the chain!`**
+Geth has received nothing from a beacon node. Check that Prysm is running, uses `--execution-endpoint=http://localhost:8551`, and that its logs show no authentication errors.
+
+**`Beacon client online, but never received consensus updates. Please ensure your beacon client is operational to follow the chain!`**
+Prysm reaches Geth but hasn't sent a fork-choice update yet, usually because the beacon node is still syncing. Check the beacon node logs.
+
+**Prysm reports `401 Unauthorized`.**
+The secrets differ. Without `--authrpc.jwtsecret`, Geth generates its own at `<datadir>/geth/jwtsecret`, and if the path you give doesn't exist, Geth creates a new secret there. At startup Geth logs `Loaded JWT secret file` when it read an existing file and `Generated JWT secret` when it made a new one; the second means the path is wrong. Pass the same file to both clients.
+
+**Prysm can't connect to a Geth on another host.**
+Geth's Engine API listens on `localhost` and accepts only the `localhost` host name. Set `--authrpc.addr` to a private address and add the name Prysm uses to `--authrpc.vhosts`. Keep the port firewalled; see [Run the execution client on another host](/setup/connect-execution-client/#run-the-execution-client-on-another-host).
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

@@ -1,0 +1,45 @@
+---
+title: Try it on Hoodi first
+description: Rehearse your whole Prysm setup on the Hoodi testnet with free test ETH, and learn what changes when you move to mainnet.
+---
+
+Hoodi is the public Ethereum testnet for stakers. It runs the same software as mainnet and gets each network upgrade before mainnet does, but its ETH has no value. Set up your node and validator there first. Mistakes that would cost real ETH on mainnet (a wrong withdrawal address, a missing fee recipient, keys running twice) cost nothing on Hoodi.
+
+## What to rehearse
+
+- The whole [Quickstart](/get-started/quickstart/) and [validator setup](/get-started/become-a-validator/), end to end.
+- Running everything as a [service](/setup/run-as-a-service/), and a reboot.
+- An [update](/install/update/) and a [restore from backup](/operate/backup-and-restore/).
+- If you plan to, a [move to a new machine](/operate/move-to-new-machine/) and a [voluntary exit](/validators/exit/).
+
+## Get Hoodi ETH
+
+A validator needs 32 Hoodi ETH, plus a little for the deposit transaction fee.
+
+- The [Hoodi PoW faucet](https://hoodi-faucet.pk910.de/) sends Hoodi ETH in exchange for some computing work done in your browser. It is listed in the official [Hoodi repository](https://github.com/eth-clients/hoodi).
+- ethereum.org keeps a list of other [Hoodi faucets](https://ethereum.org/en/developers/docs/networks/).
+
+Faucets are run by third parties. None of them ever needs your mnemonic or private key: give them only an address.
+
+## Make your deposit
+
+Use the [Hoodi Launchpad](https://hoodi.launchpad.ethereum.org/). It works like the mainnet [Staking Launchpad](https://launchpad.ethereum.org/). Follow its checks, upload `deposit_data-*.json` and send 32 Hoodi ETH from your wallet, set to the Hoodi network. See [Make a deposit](/validators/deposit/).
+
+## What changes on mainnet
+
+Only the network settings. Everything else, including the folder layout and the other flags, stays the same.
+
+| | Hoodi | Mainnet |
+| --- | --- | --- |
+| Beacon node and validator flag | `--hoodi` | `--mainnet` |
+| Execution client network | Hoodi (see your client's flag in [Connect your execution client](/setup/connect-execution-client/)) | Mainnet |
+| Checkpoint sync URL (example) | `https://hoodi.beaconstate.ethstaker.cc` | `https://beaconstate.ethstaker.cc` |
+| Deposit CLI | `--chain=hoodi` | `--chain=mainnet` |
+| Launchpad | [hoodi.launchpad.ethereum.org](https://hoodi.launchpad.ethereum.org/) | [launchpad.ethereum.org](https://launchpad.ethereum.org/) |
+| Block explorer | [hoodi.beaconcha.in](https://hoodi.beaconcha.in) | [beaconcha.in](https://beaconcha.in) |
+
+:::caution[Use new keys and a new node for mainnet]
+Create a fresh mnemonic with `--chain=mainnet` for mainnet. Don't reuse your Hoodi mnemonic, which has likely been on an online machine. Start the mainnet node with a new data directory; a node can't switch networks on the same database.
+:::
+
+When your Hoodi validator has attested for a few days without problems, go through the [mainnet launch checklist](/get-started/mainnet-checklist/).

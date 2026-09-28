@@ -1,0 +1,82 @@
+---
+title: Run a slasher
+description: What Prysm's slasher does, how to enable it on a beacon node, what it costs in resources, and when it's worth running.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A slasher watches every block and attestation your beacon node sees, remembers each validator's history, and detects **slashable offenses**: two different blocks for the same slot, two conflicting votes for the same target, or votes that surround each other. When it finds one, it hands the proof to the beacon node, which broadcasts it so a block proposer can include it and the offender gets slashed.
+
+Running a slasher is **optional** and doesn't protect your own validators. Your validators are protected by their [slashing protection database](/validators/slashing-protection/). The slasher protects the network by catching *other* validators' offenses.
+
+## Is it worth it?
+
+- **The network needs only a few.** One honest, well-connected slasher is enough to catch an offense; any proposer can then include the proof.
+- **It is not a source of income.** The proof is gossiped to the whole network and the reward goes to whichever proposer includes it, which is rarely you. Slashings are rare.
+- **It is expensive.** It keeps a history for every validator on the network, so it needs a lot of extra disk, memory and disk I/O. On a home staking machine it can slow the beacon node enough to hurt your own attestations.
+
+Run one if you operate infrastructure with spare capacity (a staking pool, a data center, an explorer) and want to contribute to network security. Home stakers are usually better off without it.
+
+## Before you begin
+
+- A synced beacon node on hardware well above the [system requirements](/get-started/system-requirements/), with a fast SSD (NVMe) and plenty of free space.
+- Good peer connectivity: the slasher can only detect what your node receives. See [Peers, ports and NAT](/setup/networking/).
+
+## Enable it
+
+<Steps>
+
+1. **Add <Flag name="slasher" /> to the beacon node.**
+
+   ```bash
+   ./prysm.sh beacon-chain \
+     --mainnet \
+     --slasher
+   ```
+
+   The slasher runs inside the beacon node process; there's no separate binary or port.
+
+2. **Optionally put its database on another disk** with <Flag name="slasher-datadir" />. By default it is `slasher.db` in `<datadir>/beaconchaindata/`, next to the beacon database. With `--slasher-datadir=<DIR>`, it goes to `<DIR>/beaconchaindata/slasher.db`.
+
+3. **Check that it started.** The slasher waits for the beacon node to sync, then logs:
+
+   ```text
+   [2026-09-28 10:05:00.00]  INFO slasher: Completed chain sync, starting slashing detection
+   ```
+
+   After that, it logs processing summaries such as `Done processing queued attestations` as it works through batches, and periodically `Pruning old attestations and proposals for slasher` as it drops history older than 4096 epochs.
+
+</Steps>
+
+## What you see when it finds something
+
+```text
+[2026-09-28 11:00:00.00]  INFO slasher: Proposer slashing detected slot=12345678 validatorIndex=4242
+[2026-09-28 11:00:00.00]  WARN slasher: Slashable attestation offenses found numSlashings=1
+[2026-09-28 11:00:00.00]  INFO slasher: Attester slashing detected prevSourceEpoch=385800 prevTargetEpoch=385801 sourceEpoch=385799 targetEpoch=385802 validatorIndex=[4242]
+```
+
+The beacon node puts the slashing in its operations pool and broadcasts it. Your own validators include pending slashings in the blocks they propose. <Flag name="disable-broadcast-slashings" /> stops the beacon node from broadcasting slashings; leave it off unless you have a reason.
+
+Metrics to watch (all on the beacon node's metrics port):
+
+| Metric | Meaning |
+| --- | --- |
+| `slasher_attestations_processed_total`, `slasher_blocks_processed_total` | Throughput. Should rise steadily. |
+| `slasher_attestations_dropped_total`, `slasher_attestations_deferred_total` | Attestations it couldn't process now or at all. A growing dropped count means the slasher can't keep up. |
+| `slasher_double_proposals_total`, `slasher_double_votes_total`, `slasher_surrounding_votes_total`, `slasher_surrounded_votes_total` | Offenses detected, by type. |
+
+## Serving history to an external slasher
+
+<Flag name="historical-slasher-node" /> prepares a beacon node to serve historical data to a slasher that runs elsewhere: it sets <Flag name="slots-per-archive-point" /> to 128 and raises the maximum API page size. It uses more disk. You don't need it for the built-in slasher.
+
+## Turn it off
+
+Remove <Flag name="slasher" /> and restart. The slasher database stays on disk; delete `slasher.db` if you don't plan to use it again.
+
+## Next steps
+
+- [Rewards, penalties and slashing](/learn/rewards-penalties-slashing/)
+- [Avoid slashing](/security/avoid-slashing/)
+- [Storage, pruning and archive nodes](/operate/storage/)

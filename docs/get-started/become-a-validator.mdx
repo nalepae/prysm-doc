@@ -1,0 +1,139 @@
+---
+title: "Become a validator"
+description: Add a Prysm validator to your running node, from creating keys to your first attestation, in five steps.
+---
+
+import { Steps, Tabs, TabItem, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+This guide adds a validator to the node you set up in the [Quickstart](/get-started/quickstart/). You create keys, load them into Prysm, start the validator client, deposit 32 ETH and check that it attests. Each step links to a page with the details.
+
+:::caution[Do this on Hoodi first]
+Go through every step on the Hoodi testnet with free test ETH before you deposit real ETH. See [Try it on Hoodi first](/get-started/try-on-hoodi/). The commands below use `--hoodi`; swap in `--mainnet` when you're ready.
+:::
+
+## Before you begin
+
+- Your execution client and beacon node are running and synced: `curl -s http://localhost:3500/eth/v1/node/syncing` shows `"is_syncing":false` and `"is_optimistic":false`. See [Run a node](/get-started/quickstart/).
+- You have 32 ETH (or 32 Hoodi ETH) in a wallet you control, and an Ethereum address for rewards and withdrawals.
+- Ideally, a separate machine that has never been online, for creating your keys.
+
+<Steps>
+
+1. **Create your validator keys.**
+
+   Download the [EthStaker deposit CLI](https://github.com/ethstaker/ethstaker-deposit-cli/releases) on the offline machine and run:
+
+   ```bash
+   ./deposit new-mnemonic \
+     --num_validators=1 \
+     --chain=hoodi \
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   Replace `<YOUR_WITHDRAWAL_ADDRESS>` with an address you control: your stake goes there when you exit. The CLI asks you to set a keystore password, then shows a 24-word mnemonic. Write the mnemonic on paper and keep it offline. Anyone who has it controls your validator.
+
+   It creates a `validator_keys` folder with one `keystore-m_*.json` per validator and a `deposit_data-*.json` file. Copy the folder to your node. Details and the compounding (`0x02`) option: [Create validator keys](/validators/create-keys/).
+
+2. **Import the keys into Prysm.**
+
+   From your `consensus` folder:
+
+   <Tabs syncKey="os">
+   <TabItem label="Linux, macOS">
+
+   ```bash
+   ./prysm.sh validator accounts import \
+     --hoodi \
+     --keys-dir=<PATH_TO_VALIDATOR_KEYS> \
+     --wallet-dir=./wallet
+   ```
+
+   </TabItem>
+   <TabItem label="Windows">
+
+   ```powershell
+   .\prysm.bat validator accounts import `
+     --hoodi `
+     --keys-dir=<PATH_TO_VALIDATOR_KEYS> `
+     --wallet-dir=.\wallet
+   ```
+
+   </TabItem>
+   </Tabs>
+
+   Replace `<PATH_TO_VALIDATOR_KEYS>` with the path to `validator_keys`. Prysm asks you to choose a wallet password, then for the keystore password from step 1. It ends with `Imported accounts [...]`. See [Import keys](/validators/import-keys/).
+
+3. **Start the validator client with your fee recipient.**
+
+   <Tabs syncKey="os">
+   <TabItem label="Linux, macOS">
+
+   ```bash
+   ./prysm.sh validator \
+     --hoodi \
+     --wallet-dir=./wallet \
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+   </TabItem>
+   <TabItem label="Windows">
+
+   ```powershell
+   .\prysm.bat validator `
+     --hoodi `
+     --wallet-dir=.\wallet `
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+   </TabItem>
+   </Tabs>
+
+   Replace `<YOUR_WALLET_ADDRESS>` with the address that should receive transaction fees from the blocks you propose. If neither the validator nor the beacon node has one set, those fees go to the zero address and are lost. The validator asks for the wallet password on startup; to run it unattended, use <Flag name="wallet-password-file" bin="validator" />. See [Set your fee recipient](/validators/fee-recipient/).
+
+   Until your deposit is processed, the validator logs `Waiting for deposit to be observed by beacon node`. That's expected. Leave it running.
+
+4. **Make your deposit.**
+
+   Open the [Hoodi Launchpad](https://hoodi.launchpad.ethereum.org/) (on mainnet, the [Staking Launchpad](https://launchpad.ethereum.org/)), upload `deposit_data-*.json` and follow its checks to send the deposit from your wallet. Type the launchpad address yourself: phishing copies are common. Never send real ETH to a testnet deposit contract. See [Make a deposit](/validators/deposit/).
+
+5. **Wait for activation.**
+
+   The beacon chain processes the deposit, then puts your validator in the activation queue. This takes from hours to weeks, depending on the queue. The validator client logs each stage:
+
+   ```text
+   Validator deposited, entering activation queue after finalization
+   Waiting for activation... Check validator queue status in a block explorer
+   Validator activated
+   ```
+
+</Steps>
+
+## Check that it works
+
+Once active, the validator attests once per epoch (every 6.4 minutes). Look for this line in the validator's output:
+
+```text
+INFO client: Submitted new attestations blockRoot=0x5e3a3cb822d6 committeeIndices=[13] pubkeys=[0xa1b2c3d4e5f6] sinceSlotStartTime=4.01s slot=12345651 sourceEpoch=385800 sourceRoot=0xa02cc7706494 targetEpoch=385801 targetRoot=0x72d7a888b2f0
+```
+
+You can also ask the beacon node for the validator's status. Replace `<VALIDATOR_PUBKEY>` with the public key from your keystore file (`0x` followed by 96 hex characters):
+
+```bash
+curl -s http://localhost:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_PUBKEY>
+```
+
+`"status":"active_ongoing"` means your validator is live. Look it up on a block explorer such as [hoodi.beaconcha.in](https://hoodi.beaconcha.in) to follow its rewards. See [Is my node healthy?](/operate/check-health/).
+
+:::danger[Run each key in one place only]
+Never run the same validator keys in two validator clients at once, not even as a backup. Both would sign, and your validator would be slashed. See [Avoid slashing](/validators/avoid-slashing/).
+:::
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Run as a service" description="Keep all three programs running after a reboot." href="/setup/run-as-a-service/" />
+	<LinkCard title="Mainnet launch checklist" description="What to check before you stake real ETH." href="/get-started/mainnet-checklist/" />
+	<LinkCard title="Back up and restore" description="What to back up, and how to recover." href="/operate/backup-and-restore/" />
+	<LinkCard title="Use MEV-Boost" description="Earn more from the blocks you propose." href="/validators/mev-boost/" />
+</CardGrid>

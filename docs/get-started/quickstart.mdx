@@ -1,0 +1,66 @@
+---
+title: "Run a node"
+description: Run an Ethereum node with an execution client and a Prysm beacon node, with commands generated for your operating system, network and execution client.
+hide_table_of_contents: true
+---
+
+import QuickstartBuilder from '@site/src/components/QuickstartBuilder';
+import { Tabs, TabItem, LinkCard, CardGrid } from '@site/src/components/ui';
+
+This guide gets a full Ethereum node running on one machine: an **execution client** and a **Prysm beacon node**. Pick your setup below, and every command on the page updates to match it.
+
+:::tip[Start on Hoodi]
+Choose **Hoodi testnet** for your first run. It behaves like mainnet, and mistakes cost nothing. Check your machine against the [system requirements](/get-started/system-requirements/) first.
+:::
+
+<QuickstartBuilder />
+
+## Check that it works
+
+Leave both programs running and open a new terminal. Ask the beacon node whether it has caught up:
+
+<Tabs syncKey="os">
+<TabItem label="Linux, macOS">
+
+```bash
+curl -s http://localhost:3500/eth/v1/node/syncing
+curl -s http://localhost:3500/eth/v1/node/peer_count
+```
+
+</TabItem>
+<TabItem label="Windows">
+
+```powershell
+curl.exe -s http://localhost:3500/eth/v1/node/syncing
+curl.exe -s http://localhost:3500/eth/v1/node/peer_count
+```
+
+</TabItem>
+</Tabs>
+
+Your node is ready when the first command shows all three of these:
+
+- `"is_syncing":false`: the beacon node has caught up with the chain.
+- `"is_optimistic":false`: the execution client has caught up too. It stays `true` while the execution client is still syncing, which can take hours.
+- `"el_offline":false`: the beacon node can reach the execution client.
+
+The second command should show a `connected` count that grows over the first minutes. Tens of peers is normal; Prysm aims for up to 70.
+
+In the beacon node's terminal, a synced node logs one line per block, about every 12 seconds:
+
+```text
+INFO blockchain: Synced new block block=0x5b7dd003... epoch=385801 finalizedEpoch=385799 finalizedRoot=0xcdeff59f... sinceSlotStartTime=1.9s slot=12345650
+```
+
+Every minute it also logs `Connected peers` with the current `total`. If you see few peers, open your P2P ports: see [Ports, peers and router setup](/setup/networking/). For more checks, see [Is my node healthy?](/operate/check-health/).
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Become a validator" description="Create keys, import them, deposit and start attesting." href="/get-started/become-a-validator/" />
+	<LinkCard title="Run as a service" description="Start everything on boot and restart it after a crash." href="/setup/run-as-a-service/" />
+	<LinkCard title="Ports, peers and router setup" description="Allow inbound peers for a healthier node." href="/setup/networking/" />
+	<LinkCard title="Dashboards and alerts" description="Prometheus and Grafana for Prysm." href="/operate/metrics/" />
+</CardGrid>
+
+Stuck? See [Fix common problems](/operate/troubleshooting/) or ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP).

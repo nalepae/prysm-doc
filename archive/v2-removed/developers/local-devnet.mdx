@@ -1,0 +1,189 @@
+---
+title: Run a local devnet
+description: Start a private multi-client Ethereum network on your machine with Kurtosis and ethereum-package, running Prysm images you built from source, and generate a genesis state with prysmctl for custom setups.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A local devnet is a private Ethereum network with its own genesis, validators and execution clients, running in containers on your machine. Use one to try a change against other clients, reproduce a bug on a fresh chain, or test a fork transition without waiting for a testnet.
+
+The recommended tool is [ethereum-package](https://github.com/ethpandaops/ethereum-package), a [Kurtosis](https://docs.kurtosis.com/) package that generates genesis and validator keys and starts every client for you. Prysm's own [Kurtosis end-to-end test](/developers/e2e-tests/#run-the-kurtosis-test) uses it too.
+
+<Aside type="note" title="Interop flags are gone">
+Older guides started devnets with `--interop-num-validators`, `--interop-start-index` and `--interop-eth1data-votes`. These flags have been removed from Prysm. Use ethereum-package, which provisions keys and genesis, or generate a genesis state with `prysmctl` as described [below](#generate-a-genesis-state-yourself).
+</Aside>
+
+{/* Verified against ethereum-package at commit d919910 (6.1.0-37), 2026-09. */}
+
+## Before you begin
+
+- [Docker](https://docs.docker.com/get-docker/) installed and running.
+- The [Kurtosis CLI](https://docs.kurtosis.com/install/) installed.
+- [Set up your environment](/developers/environment/) if you want to run your own Prysm build.
+
+## Start a devnet with released images
+
+<Steps>
+
+1. Write a network configuration. This one runs two Prysm nodes on Geth and one Lighthouse node on Nethermind, with the Dora block explorer:
+
+   ```yaml title="network_params.yaml"
+   participants:
+     - el_type: geth
+       cl_type: prysm
+       count: 2
+     - el_type: nethermind
+       cl_type: lighthouse
+   additional_services:
+     - dora
+   ```
+
+   With `cl_type: prysm`, ethereum-package also starts a Prysm validator client for each participant.
+
+2. Start the devnet in an enclave named `prysm-devnet`:
+
+   ```bash
+   kurtosis run --enclave prysm-devnet github.com/ethpandaops/ethereum-package --args-file ./network_params.yaml
+   ```
+
+   When it finishes, Kurtosis prints every service with its mapped ports.
+
+3. List the services and their ports again at any time:
+
+   ```bash
+   kurtosis enclave inspect prysm-devnet
+   ```
+
+   Prysm beacon nodes are named like `cl-1-prysm-geth`, and their validator clients start with `vc-`.
+
+</Steps>
+
+## Run your own Prysm build
+
+<Steps>
+
+1. Build your Prysm images and load them into Docker. The `_e2e` targets build Linux images for your CPU on both Linux and macOS:
+
+   ```bash
+   bazel run //cmd/beacon-chain:oci_image_tarball_e2e
+   bazel run //cmd/validator:oci_image_tarball_e2e
+   ```
+
+   See [Build Docker images](/developers/docker-images/) for details.
+
+2. Tag them so they can't be confused with a published image:
+
+   ```bash
+   docker tag gcr.io/offchainlabs/prysm/beacon-chain:latest prysm-beacon-chain:local
+   docker tag gcr.io/offchainlabs/prysm/validator:latest prysm-validator:local
+   ```
+
+3. Point the Prysm participants at your images with `cl_image` and `vc_image`, and add any flags you want to test with `cl_extra_params` and `vc_extra_params`:
+
+   ```yaml title="network_params.yaml"
+   participants:
+     - el_type: geth
+       cl_type: prysm
+       cl_image: prysm-beacon-chain:local
+       vc_image: prysm-validator:local
+       cl_log_level: debug
+       cl_extra_params:
+         - "--<FLAG_UNDER_TEST>"
+       count: 2
+     - el_type: nethermind
+       cl_type: lighthouse
+   additional_services:
+     - dora
+   ```
+
+   Replace `--<FLAG_UNDER_TEST>` with the flag you're testing, or remove the `cl_extra_params` block.
+
+4. Start the devnet as before. To pick up a new build later, rebuild and retag the images, then remove the enclave and run it again.
+
+</Steps>
+
+### Use the minimal preset
+
+The minimal preset has 8 slots per epoch instead of 32, so the chain reaches finality and fork epochs much sooner. Presets are compiled into the binaries, so every client in a minimal devnet must run a minimal-preset build:
+
+1. Build Prysm's images with `--config=minimal`:
+
+   ```bash
+   bazel run --config=minimal //cmd/beacon-chain:oci_image_tarball_e2e
+   bazel run --config=minimal //cmd/validator:oci_image_tarball_e2e
+   ```
+
+   Tag them as in the previous section.
+
+2. Set `preset: minimal` in `network_params`. Without `cl_image`, ethereum-package picks its minimal-preset Prysm images (`ethpandaops/prysm-beacon-chain:develop-minimal` and `ethpandaops/prysm-validator:develop-minimal`) on its own, but other clients need minimal images too. Prysm's own configuration in `testing/endtoend/network-config/minimal.yaml` is a complete example, including fork epochs, faster slots and blob schedule overrides:
+
+   ```yaml title="network_params.yaml"
+   participants:
+     - el_type: geth
+       cl_type: prysm
+       cl_image: prysm-beacon-chain:local
+       vc_image: prysm-validator:local
+       count: 2
+   network_params:
+     preset: minimal
+     electra_fork_epoch: 0
+     fulu_fork_epoch: 2
+   ```
+
+ethereum-package passes <Flag name="minimal-config" /> to Prysm when the preset is minimal.
+
+## Work with the devnet
+
+| Task | Command |
+| --- | --- |
+| Follow a node's logs | `kurtosis service logs -f prysm-devnet cl-1-prysm-geth` |
+| Open a shell in a container | `kurtosis service shell prysm-devnet cl-1-prysm-geth` |
+| Download the generated genesis and config files | `kurtosis files download prysm-devnet el_cl_genesis_data ./genesis` |
+| Remove the devnet and its data | `kurtosis enclave rm -f prysm-devnet` |
+
+ethereum-package starts Prysm beacon nodes with the Beacon API, metrics and pprof listening on all interfaces inside the container. Use the ports from `kurtosis enclave inspect` to reach them from your machine, for example to [profile a node](/developers/debugging/#profile-with-pprof).
+
+## Generate a genesis state yourself
+
+If you build your own harness instead of using Kurtosis, `prysmctl` generates a beacon genesis state from a chain config, with deterministic validator keys:
+
+```bash
+curl -o /tmp/minimal.yaml https://raw.githubusercontent.com/ethereum/consensus-specs/refs/heads/dev/configs/minimal.yaml
+
+bazel run --config=minimal //cmd/prysmctl -- \
+  testnet generate-genesis \
+  --chain-config-file=/tmp/minimal.yaml \
+  --num-validators=256 \
+  --genesis-time-delay=120 \
+  --fork=<FORK> \
+  --output-ssz=/tmp/genesis.ssz
+```
+
+Replace `<FORK>` with the fork the chain starts at, for example `electra`. The default is `phase0`. `--geth-genesis-json-in` and `--geth-genesis-json-out` read and write a matching Geth `genesis.json` so the execution layer starts from the same genesis. Start the beacon nodes with <Flag name="chain-config-file" />, <Flag name="genesis-state" />, <Flag name="bootstrap-node" /> or <Flag name="no-discovery" />, and <Flag name="min-sync-peers" value="0" /> for a single node.
+
+## Check that it works
+
+Query a Prysm beacon node's head through its mapped Beacon API port:
+
+```bash
+curl -s http://127.0.0.1:<MAPPED_PORT>/eth/v1/beacon/headers/head
+```
+
+Replace `<MAPPED_PORT>` with the host port Kurtosis shows for the beacon node's `http` port. Run it twice a slot apart: the `slot` increases. In Dora, the explorer's URL is in the `kurtosis enclave inspect` output, and you can see blocks from every participant.
+
+## Troubleshooting
+
+**The devnet runs a published Prysm instead of your build.** Check that the participant sets both `cl_image` and `vc_image` to your local tags, and that `docker image ls prysm-beacon-chain` shows the image you just built. Without `cl_image`, ethereum-package uses its default Prysm images.
+
+**The Prysm container exits immediately with `exec format error`.** The image contains a binary for another platform, usually a macOS binary from `:oci_image_tarball`. Rebuild with `:oci_image_tarball_e2e`.
+
+**Prysm fails with SSZ size or config mismatch errors on a minimal devnet.** Your images were built without `--config=minimal`. Rebuild them with it.
+
+**The enclave already exists.** Remove it with `kurtosis enclave rm -f prysm-devnet`, or pick another `--enclave` name.
+
+## Next steps
+
+- [End-to-end tests](/developers/e2e-tests/)
+- [Debugging and profiling](/developers/debugging/)
+- [Build Docker images](/developers/docker-images/)

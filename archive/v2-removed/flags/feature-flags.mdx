@@ -1,0 +1,92 @@
+---
+title: Feature flags
+description: What each beacon node feature flag toggles, how mature it is, whether it's safe in production, and how feature flags are introduced, made default and removed across Prysm releases.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Feature flags turn on behavior that isn't the default yet, or turn off a new default. Most operators need none of them. Use one when the release notes or the Prysm team recommend it, or when you're testing a feature on a testnet node. The reference lists them under [Feature flags](/reference/cli/beacon-chain/#group-features); the network flags (`--hoodi`, `--mainnet` and so on) live in the same group and are covered in [How flags work](/flags/#choose-a-network).
+
+## How feature flags work
+
+A feature usually goes through these stages across releases:
+
+1. **Opt-in:** it ships behind an `--enable-…` flag (or a plain name like `--sync-from`), off by default.
+2. **Default:** once it's proven, it becomes the default, and a `--disable-…` flag lets you turn it off for a while. In this release, for example, QUIC and builder SSZ encoding are on by default, with <Flag name="disable-quic" /> and <Flag name="disable-builder-ssz" /> as opt-outs.
+3. **Deprecated:** the flag stops doing anything, is hidden from `--help`, and is eventually deleted. Starting the node with a removed flag fails, so clean deprecated flags out of your config.
+
+At startup the node logs one warning per flag you set: `Enabled feature flag` or `Disabled feature flag`, with the flag's description. That's the quickest way to check what's active. Check the [release notes](https://github.com/OffchainLabs/prysm/releases) when you upgrade: a flag you set may have become the default, changed or been deprecated.
+
+## Experimental features
+
+Not recommended for production validators. Try them on a testnet node first.
+
+| Flag | What it does | Production |
+| --- | --- | --- |
+| <Flag name="dev" /> | Turns on the flags the developers want tested. In this release, only `--enable-backfill`. Logs `Enabling development mode flags` | No; set individual flags instead |
+| <Flag name="enable-experimental-attestation-pool" /> | Replaces the attestation pools with a single new attestation cache | No |
+| <Flag name="enable-fast-confirmation" /> | Runs the fast confirmation rule; the confirmed block becomes the `safe` block sent to the execution client, and a `fast_confirmation` event is emitted | No |
+| <Flag name="enable-state-diff" /> | Stores history as snapshots and diffs; fresh database only, exponents fixed at creation (see [Archive nodes](/flags/sync-and-storage/#archive-nodes)) | No |
+| <Flag name="enable-discovery-reboot" /> | Restarts discovery when outbound peers stay low for more than five one-minute checks | Opt-in, low risk |
+| <Flag name="partial-data-columns" /> | Gossips PeerDAS data columns cell by cell and builds cells from execution client mempool blobs (see [Networking](/flags/networking/#request-limits-and-gossip)) | No; testnet first |
+| <Flag name="enable-light-client" /> | Serves light client data over the Beacon API and P2P (see [APIs](/flags/apis/#light-client)) | Opt-in |
+
+## Performance and resource use
+
+| Flag | What it does | Production |
+| --- | --- | --- |
+| <Flag name="enable-hashtree" /> | Uses the `hashtree` library for Merkle hashing instead of `gohashtree`; same results, speed depends on CPU | Benchmark first |
+| <Flag name="ignore-unviable-attestations" /> | Drops attestations whose target isn't viable from the current head, avoiding expensive state replays | Advanced tuning |
+| <Flag name="disable-track-equivocations" /> | Stops recording early proposer equivocations in fork choice | Leave the default |
+| <Flag name="disable-resource-manager" /> | Removes libp2p's limits on connections, streams and memory | No; only to diagnose limit errors |
+| <Flag name="disable-quic" /> | TCP-only peering (see [Networking](/flags/networking/#ports-and-firewall)) | Yes, if UDP is a problem |
+| <Flag name="blob-save-fsync" /> | `fsync` each blob file before counting it as stored | Yes; slower writes |
+| <Flag name="disable-registration-cache" /> | Keeps builder registrations in the database (kept across restarts) instead of the default in-memory cache | Only to diagnose registration problems; temporary flag |
+| <Flag name="save-full-execution-payloads" /> | Stores full payloads instead of blinded blocks; fresh database only | Yes; much more disk |
+| <Flag name="enable-proposer-preprocessing" /> | Verifies a block's signatures before proposing it | Yes |
+| <Flag name="prepare-all-payloads" /> | Prepares a payload and emits `payload_attributes` every slot | For builders and relays |
+
+## Debugging
+
+Safe to turn on temporarily; remove them when you're done.
+
+- <Flag name="save-invalid-block-temp" /> writes gossiped blocks that fail validation to the OS temp directory as `beacon_block_<slot>.ssz` and logs `Writing invalid block to disk at …`.
+- <Flag name="save-invalid-blob-temp" /> does the same for blob sidecars. Files from both flags are never cleaned up automatically.
+- <Flag name="enable-full-ssz-data-logging" /> adds the full message to the debug-level `Gossip message was rejected` log. Only visible with `--verbosity=debug` (or a matching `--log.vmodule`), and log files grow fast.
+- <Flag name="disable-verbose-sig-verification" /> skips the per-signature check that runs after a batch signature check fails, so errors no longer say which signature is bad. Leave the default.
+- <Flag name="disable-grpc-connection-logging" /> hides the `gRPC client connected to beacon node` line.
+
+## Recover from a bad chain
+
+For incidents such as a long period of non-finality or a known-bad block. Use them when the Prysm team or client teams advise it, and remove them afterwards.
+
+- <Flag name="sync-from" /> restarts from the head saved in the database (`--sync-from=head`) or from a known block root, instead of the justified checkpoint. If the block is unknown or older than the finalized checkpoint, the node logs an error and starts from the finalized block.
+- <Flag name="blacklist-roots" /> treats blocks with these roots as invalid in gossip, sync and processing, and downscores peers that send them. Entries must be `0x`-prefixed 32-byte hex; malformed ones are skipped with `Failed to parse blacklisted root`.
+
+```bash
+./prysm.sh beacon-chain --hoodi --blacklist-roots=0x<BAD_BLOCK_ROOT> ...
+```
+
+## Devnets and testing
+
+Never use these on mainnet or a public testnet.
+
+- <Flag name="disable-peer-scorer" /> turns off peer scoring, so misbehaving peers stay connected.
+- <Flag name="disable-broadcast-slashings" /> stops gossiping slashings; they still go into the local pool.
+- <Flag name="disable-staking-contract-check" /> lets proposers build `eth1_data` on devnets without a deposit contract.
+
+<Aside type="caution">
+`--disable-peer-scorer` removes your node's defense against spamming and faulty peers.
+</Aside>
+
+## Deprecated flags
+
+These still parse so old configs don't break, but do nothing or are on their way out. Remove them.
+
+| Flag | Status | Replacement |
+| --- | --- | --- |
+| <Flag name="disable-last-epoch-targets" /> | No effect, no warning | <Flag name="ignore-unviable-attestations" /> |
+| <Flag name="enable-historical-state-representation" /> | Pending deprecation; the one-way database migration it triggers stays in place after you remove the flag, and the node warns that it needs to be resynced after removal | <Flag name="enable-state-diff" /> on a fresh database |
+
+Hidden deprecated flags, which no longer appear in `--help`, log an error when set: `<name> is deprecated and has no effect. Do not use this flag, it will be deleted soon.` On the beacon node these currently include `--http-modules`, `--enable-db-backup-webhook`, `--slasher-rpc-provider`, `--slasher-tls-cert`, `--track-equivocations` and the `--interop-*` flags. `--enable-builder-ssz` (SSZ is now the default; use <Flag name="disable-builder-ssz" /> to opt out) is accepted silently.

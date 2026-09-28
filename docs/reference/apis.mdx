@@ -1,0 +1,92 @@
+---
+title: APIs
+description: What the Beacon API, Keymanager API and Prysm-only APIs are for, their default addresses, how to enable and secure them, and example requests.
+---
+
+import Flag from '@site/src/components/Flag';
+
+Prysm serves three kinds of API. All of them listen on `127.0.0.1` by default. Keep them there, and reach them from other machines through an SSH tunnel or a VPN (see [Security checklist](/security/)).
+
+| API | Served by | Default address | Authentication | Specification |
+| --- | --- | --- | --- | --- |
+| Beacon API | Beacon node | `http://127.0.0.1:3500` | None | [ethereum.github.io/beacon-APIs](https://ethereum.github.io/beacon-APIs/) |
+| Keymanager API | Validator client, when enabled | `http://127.0.0.1:7500` | Bearer token | [ethereum.github.io/keymanager-APIs](https://ethereum.github.io/keymanager-APIs/) |
+| Prysm-only REST | Beacon node | `http://127.0.0.1:3500/prysm/v1/…` | None | This page |
+| gRPC (legacy) | Beacon node | `127.0.0.1:4000` | None | Used by the Prysm validator client |
+
+## Beacon API
+
+The standard REST API every consensus client serves. Validator clients, dashboards and explorers use it, so tools written for any client work with Prysm. It's always on. Change where it listens with <Flag name="http-host" /> and <Flag name="http-port" />.
+
+Check whether the node is synced:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+```json
+{"data":{"head_slot":"1234567","sync_distance":"0","is_syncing":false,"is_optimistic":false,"el_offline":false}}
+```
+
+`is_syncing: false` means the node is at the head. `el_offline: true` means it can't reach the execution client.
+
+Look up one of your validators by index or public key:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY>
+```
+
+Other useful requests: `GET /eth/v1/node/health` (200 when synced), `GET /eth/v1/node/version` and `GET /eth/v1/node/peer_count`.
+
+:::caution
+The Beacon API has no authentication. Some requests are expensive enough to slow the node, and others reveal which validators you run. Don't set <Flag name="http-host" /> to `0.0.0.0` on a machine reachable from the internet.
+:::
+
+## Keymanager API
+
+The standard REST API for managing keys in a running validator client: list, import and delete keystores, and set per-key fee recipient, gas limit and graffiti. It's off by default. Turn it on with <Flag name="rpc" bin="validator" />:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --rpc \
+  --wallet-dir=<WALLET_DIR> \
+  --keymanager-token-file=<WALLET_DIR>/auth-token
+```
+
+Replace `<WALLET_DIR>` with your wallet directory. Every request needs the token from that file as a bearer token. Prysm creates the file if it doesn't exist. Set <Flag name="keymanager-token-file" bin="validator" /> explicitly: otherwise the token goes to the default wallet location even when you pass a custom <Flag name="wallet-dir" bin="validator" />.
+
+List the loaded keys:
+
+```bash
+TOKEN=$(cat <WALLET_DIR>/auth-token)
+curl -s \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+A `200` with your keys means the API is up and the token is accepted. `401` means the header is missing, `403` means the token is wrong. For step-by-step key workflows, see [Add or remove validators without restarting](/validators/keymanager/).
+
+:::danger
+Anyone with the token can delete your keys or sign exits. Keep <Flag name="http-host" bin="validator" /> on `127.0.0.1`, make the token file readable only by the validator's user, and never expose port 7500.
+:::
+
+## Prysm-only endpoints
+
+The beacon node also serves a few REST endpoints under `/prysm/v1/` that other clients don't have, on the same port as the Beacon API. For example, validator counts by status:
+
+```bash
+curl -s "http://127.0.0.1:3500/prysm/v1/beacon/states/head/validator_count?status=active,pending"
+```
+
+Others return chain head details (`/prysm/v1/beacon/chain_head`) and manage trusted peers (`/prysm/v1/node/trusted_peers`). Tools that must work with every client should stick to the Beacon API.
+
+## gRPC
+
+The Prysm validator client talks to the beacon node over gRPC on port `4000` by default (<Flag name="beacon-rpc-provider" bin="validator" />). It can use the Beacon API instead: set <Flag name="beacon-rest-api-provider" bin="validator" value="http://127.0.0.1:3500" />. Prysm's flag help says gRPC stays the default and fully supported through v8, and will eventually be removed in favor of REST. Don't build new tools on it.
+
+## Related pages
+
+- [Ports](/reference/ports/): every port Prysm uses.
+- [Is my node healthy?](/operate/check-health/): health checks built on these APIs.
+- [Full flag reference](/reference/cli/beacon-chain/): all API flags, such as CORS and timeouts.

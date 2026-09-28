@@ -1,0 +1,54 @@
+---
+title: Mainnet launch checklist
+description: Everything to check before you deposit real ETH and start a Prysm validator on mainnet, with a link to the page that covers each item.
+---
+
+import Flag from '@site/src/components/Flag';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+Go through this list before you deposit on mainnet. Each item links to the page that shows how. If you can't tick an item, fix it on Hoodi first.
+
+## Rehearsal
+
+- [ ] You ran the same setup on Hoodi, with a validator that attested for several days. [Try it on Hoodi first](/get-started/try-on-hoodi/)
+- [ ] You practiced an update, a reboot and a restore from backup on Hoodi. [Back up and restore](/operate/backup-and-restore/)
+
+## Software
+
+- [ ] Prysm is on the latest release (currently <PrysmVersion />), and your execution client is on its latest release too. [Update and roll back](/install/update/)
+- [ ] You verified the Prysm binaries you downloaded, or you use `prysm.sh`, which verifies them for you. [Verify your download](/install/verify/)
+- [ ] You get notified of new releases (GitHub **Watch → Custom → Releases**, or the Prysm Discord). [Update and roll back](/install/update/)
+
+## Node
+
+- [ ] The execution client and beacon node are synced: `/eth/v1/node/syncing` shows `"is_syncing":false` and `"is_optimistic":false`. [Is my node healthy?](/operate/check-health/)
+- [ ] The beacon node has a steady peer count, and its P2P ports are open and forwarded. [Ports, peers and router setup](/setup/networking/)
+- [ ] All programs run as services that start on boot and restart after a crash. [Run as a service](/setup/run-as-a-service/)
+- [ ] The disk has room to grow for months. [Disk space and archive nodes](/setup/storage/)
+- [ ] The system clock is synchronized (NTP or chrony). [Security checklist](/security/)
+- [ ] The firewall allows only SSH and the P2P ports in. The Beacon API, Keymanager API, metrics and the Engine API stay on `127.0.0.1`. [Security checklist](/security/)
+- [ ] The machine has a UPS or can ride out a short power cut, and comes back up by itself afterward.
+
+## Keys and funds
+
+- [ ] You generated the mnemonic on an offline machine, wrote it on paper or metal, and stored it somewhere safe. It has never been typed into an online computer. [Create validator keys](/validators/create-keys/)
+- [ ] The withdrawal address is one you control, and you checked it in `deposit_data-*.json` before depositing. [Keys and withdrawal credentials](/learn/keys-and-withdrawals/)
+- [ ] The fee recipient is set to an address you control. [Set your fee recipient](/validators/fee-recipient/)
+- [ ] You deposit only through the official [Staking Launchpad](https://launchpad.ethereum.org/), typed in by hand. [Make a deposit](/validators/deposit/)
+
+## Slashing
+
+:::danger
+Running the same validator key in two places at once gets it slashed: a penalty, a forced exit, and about 36 days before you can withdraw.
+:::
+
+- [ ] Each validator key is loaded in exactly one validator client. No backup client with the same keys. [Avoid slashing](/validators/avoid-slashing/)
+- [ ] The validator runs with <Flag name="enable-doppelganger" bin="validator" />, so it checks whether your keys are already active on the network before it starts signing. It catches some mistakes, not all. [Avoid slashing](/validators/avoid-slashing/)
+- [ ] Your backups include the slashing protection history, and you know to move it with the keys. [Move to a new machine](/operate/move-to-new-machine/)
+
+## Monitoring
+
+- [ ] You get an alert when the validator misses attestations, the node stops syncing, or the disk fills up. [Dashboards and alerts](/operate/metrics/)
+- [ ] You can see your validator's performance over time. [Track validator performance](/operate/validator-monitoring/)
+
+When every box is ticked, follow [Become a validator](/get-started/become-a-validator/) with `--mainnet`.

@@ -1,0 +1,243 @@
+---
+title: "Proposer settings file"
+description: "Set fee recipient, gas limit, graffiti and builder options per validator with a JSON or YAML proposer settings file, and understand how it combines with flags, the Keymanager API and the validator database."
+---
+
+import { Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A proposer settings file tells the validator client what to put in the blocks each key proposes: which address gets the fees, which gas limit to ask builders for, which graffiti to use, and whether to use MEV-Boost. You need it when your keys don't all share the same settings; if they do, <Flag name="suggested-fee-recipient" bin="validator" /> and <Flag name="enable-builder" bin="validator" /> are enough.
+
+Load it with <Flag name="proposer-settings-file" bin="validator" /> (a local JSON or YAML file) or <Flag name="proposer-settings-url" bin="validator" /> (JSON over HTTP). You can't use both at once.
+
+## How the validator client builds its settings
+
+Proposer settings are read once, at startup, from up to three sources. Each source is laid over the previous one:
+
+1. **The validator database** (in <Flag name="datadir" bin="validator" />): whatever the previous run saved, including changes made through the [Keymanager API](/validators/keymanager/).
+2. **<Flag name="suggested-fee-recipient" bin="validator" />**, if set: becomes the default fee recipient.
+3. **The file or URL**, if set.
+
+When a later source is laid over an earlier one:
+
+- its `default_config`, if present, replaces the earlier `default_config` entirely;
+- its `proposer_config`, if present, replaces the earlier per-key section entirely; if absent, the earlier per-key entries are kept.
+
+Then <Flag name="enable-builder" bin="validator" /> and <Flag name="suggested-gas-limit" bin="validator" /> are applied on top (see [Flags that change the file's builder settings](#flags-that-change-the-files-builder-settings)), and the result is saved back to the database. If none of the sources provides anything, the validator logs `No proposer settings were provided` and the beacon node falls back to its own <Flag name="suggested-fee-recipient" />.
+
+For each key, a value in its `proposer_config` entry wins over `default_config`.
+
+## File format
+
+The file has two sections, both optional:
+
+- `proposer_config`: a map from validator public key (`0x`-prefixed hex) to that key's settings.
+- `default_config`: settings for every key that has no entry, or whose entry leaves a field out.
+
+Prysm decodes the file strictly: an unknown or misspelled key stops startup with `unknown field "<name>"`. YAML and JSON describe the same structure; the file extension doesn't matter for <Flag name="proposer-settings-file" bin="validator" />.
+
+## Example
+
+Two keys with their own fee recipients, one of them opted out of MEV-Boost, and a default for all other keys. Replace the placeholders with your public keys and addresses.
+
+<Tabs>
+<TabItem label="YAML">
+
+```yaml title="proposer-settings.yaml"
+proposer_config:
+  # Key-specific settings. Keys are 0x-prefixed BLS public keys.
+  "0x<VALIDATOR_PUBKEY_1>":
+    fee_recipient: "0x<FEE_ADDRESS_1>"   # checksummed address recommended
+    graffiti: "validator one"          # up to 32 bytes
+    builder:
+      enabled: true                    # register with MEV-Boost relays
+      gas_limit: 60000000              # gas limit asked of builders
+  "0x<VALIDATOR_PUBKEY_2>":
+    fee_recipient: "0x<FEE_ADDRESS_2>"
+    builder:
+      enabled: false                   # always build blocks locally
+default_config:
+  # Applies to every other key, and fills fields a key leaves out.
+  fee_recipient: "0x<DEFAULT_FEE_ADDRESS>"
+  graffiti: "my staking node"
+  builder:
+    enabled: true
+    gas_limit: 60000000
+```
+
+</TabItem>
+<TabItem label="JSON">
+
+```json title="proposer-settings.json"
+{
+  "proposer_config": {
+    "0x<VALIDATOR_PUBKEY_1>": {
+      "fee_recipient": "0x<FEE_ADDRESS_1>",
+      "graffiti": "validator one",
+      "builder": {
+        "enabled": true,
+        "gas_limit": "60000000"
+      }
+    },
+    "0x<VALIDATOR_PUBKEY_2>": {
+      "fee_recipient": "0x<FEE_ADDRESS_2>",
+      "builder": {
+        "enabled": false
+      }
+    }
+  },
+  "default_config": {
+    "fee_recipient": "0x<DEFAULT_FEE_ADDRESS>",
+    "graffiti": "my staking node",
+    "builder": {
+      "enabled": true,
+      "gas_limit": "60000000"
+    }
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Start the validator with the file:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --wallet-dir=<WALLET_DIR> \
+  --proposer-settings-file=/path/to/proposer-settings.yaml
+```
+
+For MEV-Boost to work, the beacon node also needs <Flag name="http-mev-relay" />. See [MEV-Boost](/validators/mev-boost/).
+
+## Field reference
+
+Each entry in `proposer_config`, and `default_config` itself, accepts:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `fee_recipient` | address | Execution-layer address that receives priority fees and MEV payments. Optional in a per-key entry (the default applies); must be a valid address when present. |
+| `graffiti` | string | Block graffiti for this key. Takes precedence over <Flag name="graffiti" bin="validator" /> and <Flag name="graffiti-file" bin="validator" />. |
+| `gas_limit` | integer | Gas limit for this key. Wins over any `builder.gas_limit`. |
+| `builder.enabled` | boolean | Register this key with MEV-Boost relays through the beacon node (pre-Gloas). |
+| `builder.gas_limit` | integer | Gas limit sent in builder registrations (pre-Gloas). `0` or missing means the default (60,000,000). |
+| `builder.relays` | list | Accepted so old files still load, but never read. Relays are configured on the beacon node / MEV-Boost. |
+
+Integers can be written as numbers or as strings (`60000000` or `"60000000"`).
+
+The gas limit sent for a key is the first one set in this order: the key's `gas_limit`, `default_config.gas_limit`, the key's `builder.gas_limit`, `default_config.builder.gas_limit`, then the default. Prysm warns if the value is below 10% or above 150% of the default. This only affects builder registrations; your execution client decides the gas limit of blocks you build locally.
+
+### Flags that change the file's builder settings
+
+- <Flag name="enable-builder" bin="validator" /> sets `builder.enabled: true` on the default and on **every** key, overriding `enabled: false` in the file. To keep some keys out of MEV-Boost, don't use the flag; set `enabled` in the file instead.
+- <Flag name="suggested-gas-limit" bin="validator" /> overwrites `builder.gas_limit` for every key. A key's own `gas_limit` still wins over it.
+- Without <Flag name="enable-builder" bin="validator" />, builder settings saved in the database from earlier runs are dropped at startup; builder settings in the file are kept.
+
+## Builder settings from Gloas (version 2)
+
+The Gloas fork replaces MEV-Boost registrations with builder bids that the validator requests directly, and adds a version 2 file format for it. It matters only on networks that schedule Gloas; in this release it is not scheduled on mainnet or Hoodi. On such a network, Prysm warns at startup if your file still uses the version 1 builder fields (`enabled`, `builder.gas_limit`), which stop applying at the fork. Fee recipients and graffiti carry over unchanged.
+
+A version 2 file sets `version: 2` and lists builders per key or in the default:
+
+```yaml title="proposer-settings.yaml"
+version: 2
+proposer_config:
+  "0x<VALIDATOR_PUBKEY_1>":
+    fee_recipient: "0x<FEE_ADDRESS_1>"
+    gas_limit: 60000000
+    builder:
+      min_bid: 500000000                # Gwei; ignore bids below this
+      builders:
+        - url: "https://<BUILDER_A_HOST>"
+          max_execution_payment: 1000000000   # Gwei
+        - url: "https://<BUILDER_B_HOST>"
+default_config:
+  fee_recipient: "0x<DEFAULT_FEE_ADDRESS>"
+  builder:
+    builders: []                        # explicit empty list: no builders, build locally
+```
+
+| Field (under `builder`) | Meaning |
+| --- | --- |
+| `builders` | List of builders for this key. Missing means "inherit from `default_config`"; an explicit `[]` means "use no builders". At most 64 entries; invalid or duplicate entries are dropped with a warning. |
+| `builders[].url` | Builder URL with scheme and ASCII hostname (punycode for internationalized names), at most 2048 bytes. |
+| `builders[].pubkeys`, `builders[].auth_data` | Optional: accept bids only from these builder keys; custom auth data (defaults to the URL's hostname). The file decoder uses Go's `encoding/json` on plain byte fields, so both must be **base64** strings (not hex) in the file or URL response. Easier: leave them out or set them through the Keymanager API. {/* Verified in v7.2.0: config.UnmarshalFromFile -> k8s yaml.UnmarshalStrict -> encoding/json into validatorpb.BuilderEntry ([][]byte / []byte, no custom unmarshaler, not protojson). */} |
+| `min_bid` | Minimum bid in Gwei. Also settable per builder entry. |
+| `max_execution_payment` | Maximum execution-layer payment in Gwei the proposer accepts from a builder. Unset means `0`: only the collateral-backed part of a bid counts, and Prysm warns about it. Also settable per builder entry. |
+| `builder_boost_factor` | Percentage applied to builder bids when comparing them with the local payload. `100` (default) is neutral. Also settable per builder entry. |
+
+A file without `version` that uses any of these fields is treated as version 2 (Prysm logs that it did so). Versions above 2 are rejected.
+
+## Load settings from a URL
+
+<Flag name="proposer-settings-url" bin="validator" /> fetches the same structure with an HTTP GET at startup. Use it when a central service manages settings for many validator clients.
+
+- The response must have status `200` and a JSON body. YAML is not accepted here.
+- Unknown fields are rejected, as with files.
+- The URL is read once. To pick up changes, restart the validator or use the Keymanager API.
+- The request has no timeout of its own, so a hanging server delays startup.
+
+```bash
+--proposer-settings-url=https://<SETTINGS_SERVER>/proposer-settings.json
+```
+
+## Precedence and persistence
+
+Everything the validator ends up with is saved in its database, and the Keymanager API edits that saved copy. What survives a restart depends on your flags:
+
+| Started with | Per-key changes made through the Keymanager API | Default fee recipient |
+| --- | --- | --- |
+| No proposer flags | Kept | From the database |
+| <Flag name="suggested-fee-recipient" bin="validator" /> only | Kept | The flag's value |
+| A file or URL **with** `proposer_config` | **Replaced by the file**, with a warning listing the replaced keys | The file's, if it has `default_config` |
+| A file or URL with only `default_config` | Kept | The file's |
+
+When a file overrides per-key entries saved by an earlier run, Prysm logs:
+
+```text
+Per-key proposer settings saved in the validator DB by a previous run differ from the configured settings file/URL; the settings source is authoritative and the DB entries are replaced. Changes made through the keymanager API do not survive a restart while a settings file or URL is configured
+```
+
+If you manage fee recipients through the Keymanager API, don't also keep a `proposer_config` section in a settings file. Pick one source of truth.
+
+## Generate a file from a running validator
+
+`prysmctl validator proposer-settings` reads the current fee recipients from a running validator (started with <Flag name="rpc" bin="validator" />) and writes them as a proposer settings file. It exports fee recipients only; add gas limits and builder options yourself. See [Export proposer settings](/flags/prysmctl/#export-proposer-settings).
+
+## Check that it works
+
+At startup, the validator logs which sources it used:
+
+```text
+INFO loader: Proposer settings loaded from file proposer-settings-file=/path/to/proposer-settings.yaml
+```
+
+To see the fee recipient a key actually uses, query the [Keymanager API](/reference/apis/keymanager-api/):
+
+```bash
+curl -H "Authorization: Bearer <TOKEN>" \
+  http://127.0.0.1:7500/eth/v1/validator/0x<VALIDATOR_PUBKEY>/feerecipient
+```
+
+## Troubleshooting
+
+**`cannot specify both --proposer-settings-file and --proposer-settings-url flags`.** Use one of them.
+
+**`unknown field "<name>"`.** A key is misspelled or at the wrong level, for example `feeRecipient` instead of `fee_recipient`, or `relays` outside `builder`.
+
+**`fee recipient is not a valid Ethereum address` or `default fee recipient is not a valid Ethereum address`.** Check the address is 40 hex characters with a `0x` prefix. A lowercase address is accepted with a warning that shows the checksummed form; use that form.
+
+**`decode public key ...`.** A `proposer_config` key isn't a valid `0x`-prefixed 48-byte public key.
+
+**`unsupported proposer settings version`.** Only versions 1 and 2 (or no `version`) are supported.
+
+**``Builder is `enabled` in default config but will be ignored because no fee recipient was provided!``** Builder registration needs a fee recipient. Add `fee_recipient` to `default_config` or set <Flag name="suggested-fee-recipient" bin="validator" />.
+
+**A fee recipient you set through the API is back to the old value after a restart.** Your settings file has a `proposer_config` section, which replaces API changes at every start. See [Precedence and persistence](#precedence-and-persistence).
+
+## Next steps
+
+- [Fee recipient](/validators/fee-recipient/): pick and verify your fee address.
+- [MEV-Boost](/validators/mev-boost/): set up relays on the beacon node.
+- [Validator client flags](/flags/validator/#fee-recipient-gas-limit-and-mev): the related flags.
