@@ -1,0 +1,191 @@
+---
+title: Networking and peers
+description: Beacon node P2P flags explained by task - ports, NAT and public IPs, peer counts, bootnodes, trusted peers, allow and deny lists, subnets and request limits.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The beacon node talks to other nodes over three ports and keeps about 70 peers by default. Most nodes need no networking flags at all beyond opening those ports. This page explains the flags for the cases that do: home networks behind NAT, cloud servers, private peering between your own nodes, and tuning. For a step-by-step setup, see [Peers, ports and NAT](/setup/networking/).
+
+## Ports and firewall
+
+| Port | Protocol | Flag | Used for |
+| --- | --- | --- | --- |
+| 13000 | TCP | <Flag name="p2p-tcp-port" /> | libp2p connections: gossip and block/blob/column requests |
+| 13000 | UDP | <Flag name="p2p-quic-port" /> | libp2p over QUIC (on by default) |
+| 12000 | UDP | <Flag name="p2p-udp-port" /> | discv5 peer discovery |
+
+Allow all three inbound in your firewall and, behind a router, forward them to the machine. Other nodes can then connect to you, which gives you more and better peers. A node that can only make outbound connections still works, but finds peers more slowly and tends to stay below its target.
+
+The TCP and QUIC ports can share a number because they use different protocols. If you change a port, the new value is written into your node record (ENR), so other nodes learn it automatically; update your port forwarding to match.
+
+By default libp2p listens on the first non-loopback interface address it finds (IPv4 first), and discovery listens on all interfaces. On a machine with several network interfaces, pin both to one address with <Flag name="p2p-local-ip" />.
+
+```bash
+# Two beacon nodes on one host: move the second one's ports
+./prysm.sh beacon-chain --hoodi \
+  --p2p-tcp-port=13001 \
+  --p2p-quic-port=13001 \
+  --p2p-udp-port=12001 \
+  ...
+```
+
+If your network drops or throttles UDP on port 13000, turn QUIC off with <Flag name="disable-quic" />; the node then uses TCP only.
+
+## Behind a NAT
+
+On a home network your machine has a private address (such as `192.168.1.20`) and the router has the public one. Other nodes need to know the public address and reach your ports through the router.
+
+1. **Forward the ports** on your router to the machine: TCP 13000, UDP 13000, UDP 12000.
+2. **Advertise your public IP** with <Flag name="p2p-host-ip" />. Without it, discovery learns your external address from what other peers report, which usually works but can be slow or wrong behind NAT.
+3. **Or use UPnP** with <Flag name="enable-upnp" /> if your router supports it and you don't want to forward ports by hand.
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --p2p-host-ip=<YOUR_PUBLIC_IP> \
+  --p2p-max-peers=50 \
+  ...
+```
+
+Replace `<YOUR_PUBLIC_IP>` with your public IPv4 address (for example from your router's status page). The value must be a literal IP.
+
+When `--p2p-host-ip` is set, the node tries to connect to that IP and TCP port at startup. If port forwarding is missing, it logs the warning `IP address is not accessible`, which is a quick check. On success it logs `Node started external p2p server` with your public multiaddr.
+
+If your public IP changes (dynamic IP), use <Flag name="p2p-host-dns" /> with a dynamic DNS name instead. Prysm resolves the name once at startup, so restart the node after an IP change, or let discovery detect the new address. <Flag name="enable-discovery-reboot" /> (experimental) restarts discovery when peers don't recover, which can help after such a change.
+
+<Aside type="caution">
+`--enable-upnp` maps the libp2p ports (TCP and QUIC) only. It doesn't map the discovery port, UDP 12000, so forward that one yourself.
+</Aside>
+
+## Cloud server with a public IP
+
+A cloud VM usually has a public IP, possibly behind a provider firewall (security group).
+
+- Open TCP 13000, UDP 13000 and UDP 12000 in the provider firewall.
+- If the VM's interface only has a private address (common on AWS and GCP), set `--p2p-host-ip=<ELASTIC_OR_PUBLIC_IP>` so the right address is advertised.
+- Some providers flag outbound connections to private address ranges as network scanning. Add <Flag name="p2p-denylist" value="private" /> to never dial private addresses.
+- You can raise <Flag name="p2p-max-peers" /> to 100 or more if bandwidth is cheap.
+
+```bash
+beacon-chain \
+  --hoodi \
+  --p2p-host-ip=<PUBLIC_IP> \
+  --p2p-denylist=private \
+  --p2p-max-peers=100 \
+  ...
+```
+
+## Peer count
+
+<Flag name="p2p-max-peers" /> (default 70) is the target: the node looks for peers until it reaches it and refuses new ones above it, with a small buffer. At most 80% of slots go to inbound connections, so part of your peers are always ones your node chose.
+
+- **Home connection with limited upload:** 30 to 50 reduces bandwidth and CPU.
+- **Server with good bandwidth:** 70 to 100.
+- Very low values (under about 30) make it harder to cover the subnets your validators need.
+
+Every minute the node logs `Connected peers` with inbound and outbound counts for TCP and QUIC and the target, so you can see whether it reaches the target.
+
+<Flag name="min-sync-peers" /> (default 3) is how many peers must agree before initial sync starts. It's capped at `--p2p-max-peers` and, internally, at 15. <Flag name="max-concurrent-dials" /> limits simultaneous outgoing dials; set it (for example to 10) if a consumer router struggles with bursts of new connections.
+
+## Bootnodes and discovery
+
+The network flag (`--hoodi`, `--mainnet`) loads the network's bootnodes, which the node contacts to find its first peers. You only need <Flag name="bootstrap-node" /> on a custom network or to use your own bootnodes.
+
+<Aside type="caution">
+`--bootstrap-node` **replaces** the built-in list; it doesn't add to it. Only `enr:` and `enode:` records are used, and a value ending in `.yaml` is read as a YAML list of records.
+</Aside>
+
+<Flag name="no-discovery" /> turns discovery off entirely. The node then only connects to peers you list with <Flag name="peer" /> and to nodes that connect to it. Use it for private devnets or an isolated node behind your own public nodes. On a public network without `--peer`, the node ends up with no peers.
+
+<Flag name="relay-node" /> connects through a libp2p circuit relay and advertises addresses through it. It's for test setups; public networks don't run relays for beacon nodes.
+
+## Static and trusted peers
+
+<Flag name="peer" /> adds a trusted peer. Prysm dials it at startup, re-dials it whenever the connection drops, never disconnects it for a low score, and treats it as a gossipsub direct peer. It accepts multiaddr, `enr:` and `enode:` formats. Trusted peers still count toward `--p2p-max-peers`.
+
+To find a node's address, query its Beacon API. The `p2p_addresses` field contains multiaddrs with the peer ID:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/node/identity
+```
+
+Pair two of your own nodes by giving each one the other's address:
+
+```bash
+# On node A (10.0.0.5)
+beacon-chain --hoodi --peer=/ip4/10.0.0.6/tcp/13000/p2p/<PEER_ID_OF_B> ...
+# On node B (10.0.0.6)
+beacon-chain --hoodi --peer=/ip4/10.0.0.5/tcp/13000/p2p/<PEER_ID_OF_A> ...
+```
+
+A peer ID only stays the same if the node keeps its network key; see [Peer identity](#peer-identity).
+
+## Restrict which peers connect
+
+Both lists apply to inbound connections and outbound dials.
+
+| Flag | Value | Effect |
+| --- | --- | --- |
+| <Flag name="p2p-denylist" /> | CIDR ranges, repeatable | Reject peers in these ranges; allow everything else |
+| <Flag name="p2p-denylist" /> | `private` | Reject all private ranges (10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16) |
+| <Flag name="p2p-allowlist" /> | one CIDR | Accept **only** peers in this range |
+| <Flag name="p2p-allowlist" /> | `public` | Accept only public addresses (same as denying the private ranges) |
+| <Flag name="p2p-allowlist" /> | `private` | Accept only private addresses |
+
+<Aside type="caution">
+`--p2p-allowlist=192.168.0.0/16` blocks every internet peer. Only use a CIDR allowlist for a node that talks exclusively to your own nodes on the LAN.
+</Aside>
+
+## Subnets
+
+Attestations and sync committee messages travel on subnets. By default the node joins 2 long-lived attestation subnets derived from its node ID, plus the subnets its validators need at the moment. For each subnet it needs, it searches for peers until at least <Flag name="minimum-peers-per-subnet" /> (default 6) connected peers are on it.
+
+<Flag name="subscribe-all-subnets" /> joins all 64 attestation subnets and all sync committee subnets. The node then sees every attestation, which helps operators with very many validators, relays and data collectors. Expect several times more gossip traffic and CPU; it's not a good fit for home connections. It doesn't change which data columns the node stores; for that, see [supernodes](/flags/sync-and-storage/#supernodes).
+
+## Peer identity
+
+The node's network key determines its peer ID and discovery node ID. From the Fulu fork, the node ID also decides which data columns the node custodies, so it must stay stable.
+
+- Prysm saves the key in `<datadir>/network-keys` and reuses it. On networks with Fulu scheduled (mainnet, Hoodi, Sepolia) this happens by default; on other networks, <Flag name="p2p-static-id" /> turns it on.
+- <Flag name="p2p-priv-key" /> loads the key from another file instead (hex-encoded secp256k1 private key).
+- To start with a new identity, stop the node and delete `network-keys`.
+
+<Aside type="caution">
+Never run two nodes with the same key. They would claim the same peer ID. When you copy a data directory to build a second node, delete `network-keys` from the copy.
+</Aside>
+
+## Colocated nodes
+
+Prysm treats many peer identities from one IP as suspicious: more than 5 peers from the same IP are marked bad, and gossip scoring penalizes IPs with more than 10. If you run several of your own nodes behind one public IP and they peer with each other, exempt that address with <Flag name="p2p-colocation-whitelist" />:
+
+```bash
+--p2p-colocation-whitelist=203.0.113.10/32
+```
+
+## Request limits and gossip
+
+These flags rarely need changing. Change them one at a time and watch memory, bandwidth and sync speed.
+
+| Flag | Default | What it limits |
+| --- | --- | --- |
+| <Flag name="block-batch-limit" /> | 64 | Blocks per request during initial sync, and blocks per second served to each peer (requests capped at 128) |
+| <Flag name="block-batch-limit-burst-factor" /> | 2 | Burst multiplier for the block rate limit |
+| <Flag name="blob-batch-limit" /> | 384 | Blob sidecars per second served to each peer (Deneb and Electra) |
+| <Flag name="blob-batch-limit-burst-factor" /> | 3 | Burst multiplier for blobs |
+| <Flag name="data-column-batch-limit" /> | 4096 | Data column sidecars per second served to each peer (Fulu onward) |
+| <Flag name="data-column-batch-limit-burst-factor" /> | 4 | Burst multiplier for data columns |
+| <Flag name="pubsub-queue-size" /> | 1000 | Gossip validation and per-peer outbound queues; full queues drop messages |
+| <Flag name="batch-verifier-limit" /> | 1000 | Signatures verified in one BLS batch (flushed every 5 ms anyway) |
+
+<Flag name="partial-data-columns" /> (off by default in this release) gossips PeerDAS data columns cell by cell instead of as whole columns, and lets the node build cells from blobs already in the execution client's mempool when the execution client supports it. It is experimental; try it on a testnet node first.
+
+## Pitfalls
+
+- **Low peer count at home.** Usually the ports aren't forwarded. Set `--p2p-host-ip` and look for `IP address is not accessible` at startup.
+- **A cloned node shares its peer ID with the original.** You copied the data directory, including `network-keys`. Stop the clone, delete that file, and start it again.
+- **No peers on a custom network.** `--bootstrap-node` replaced the list with a wrong or unreachable record, or `--no-discovery` is set without `--peer`.
+- **High bandwidth.** Lower `--p2p-max-peers`, and remove `--subscribe-all-subnets` if you set it.
+
+Related guides: [Harden the host and network](/security/host-and-network/), [Troubleshooting](/operate/troubleshooting/).

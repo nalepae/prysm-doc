@@ -1,0 +1,101 @@
+---
+title: APIs
+description: Beacon node flags for the Beacon API (HTTP) and the Prysm gRPC API - hosts, ports, CORS, TLS, timeouts, page size, debug endpoints and light client support.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The beacon node serves two APIs. The **Beacon API** is the standard REST API over HTTP, used by tools, dashboards, MEV software, other validator clients and the Prysm validator client in REST mode. The **gRPC API** is Prysm's own, used by the Prysm validator client by default. Both listen on `127.0.0.1` only, which is right when everything runs on one machine. Change that only with the precautions in [Expose APIs safely](#expose-apis-safely).
+
+| API | Host flag | Port flag | Default |
+| --- | --- | --- | --- |
+| Beacon API (HTTP) | <Flag name="http-host" /> | <Flag name="http-port" /> | `127.0.0.1:3500` |
+| gRPC | <Flag name="rpc-host" /> | <Flag name="rpc-port" /> | `127.0.0.1:4000` |
+
+## Beacon API
+
+Check that it responds:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+To reach it from another machine or container, bind it to all interfaces and restrict access with a firewall:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --http-host=0.0.0.0 \
+  --http-port=3500 \
+  ...
+```
+
+The old names `--grpc-gateway-host` and `--grpc-gateway-port` still work as aliases. A Prysm validator client uses this API when started with <Flag name="enable-beacon-rest-api" bin="validator" /> and <Flag name="beacon-rest-api-provider" bin="validator" />.
+
+## CORS
+
+Browsers only let a web page call the Beacon API from origins listed in <Flag name="http-cors-domain" />. `curl`, scripts and validator clients ignore CORS, so you only need this for browser-based dashboards.
+
+```bash
+--http-cors-domain=http://localhost:3000,https://dashboard.example.com
+```
+
+`*` allows any origin, and one `*` inside an entry is a wildcard (`https://*.example.com`).
+
+<Aside type="caution">
+Don't put spaces after the commas: entries aren't trimmed, so ` https://a.example` never matches. The built-in default has this problem: it's joined with `, `, so of the listed origins only `http://localhost:3000` is effective. Set the flag explicitly if you need any of the others.
+</Aside>
+
+## gRPC
+
+The Prysm validator client connects to `127.0.0.1:4000` by default (its <Flag name="beacon-rpc-provider" bin="validator" />). If the validator client runs on another machine or container, set <Flag name="rpc-host" value="0.0.0.0" /> and turn on TLS.
+
+**TLS.** Pass both <Flag name="tls-cert" /> and <Flag name="tls-key" /> (PEM files). If either can't be loaded, the node exits with `Could not load TLS keys`. Without them, the node logs a warning that starts `You are using an insecure gRPC server` and serves plaintext, which is fine on localhost. Give the validator client the certificate with its <Flag name="tls-cert" bin="validator" />. TLS covers gRPC only; the Beacon API has no built-in TLS, so put a reverse proxy in front of it if you need HTTPS.
+
+```bash
+beacon-chain \
+  --hoodi \
+  --rpc-host=0.0.0.0 \
+  --tls-cert=/var/lib/ethereum/beacon/tls/beacon.crt \
+  --tls-key=/var/lib/ethereum/beacon/tls/beacon.key \
+  ...
+```
+
+At startup the node logs `Beacon chain gRPC server listening` with the address.
+
+<Flag name="grpc-max-msg-size" /> limits the size of a message the gRPC server accepts (about 2 GiB by default). Lower it if you expose gRPC to clients you don't control. <Flag name="disable-grpc-connection-logging" /> silences the `gRPC client connected to beacon node` log line when many clients connect.
+
+The gRPC API remains supported through Prysm v8, and is planned to be removed later in favor of the Beacon API. New integrations should use the Beacon API.
+
+## Timeouts and limits
+
+- <Flag name="api-timeout" /> sets a per-request timeout for the Beacon API, as a duration (`30s`). On the beacon node it only applies when you set the flag; without it, requests have no overall timeout even though the reference shows `10s`. The event stream `/eth/v1/events` is never cut off.
+- <Flag name="rpc-max-page-size" /> caps the page size of Prysm's paginated gRPC list methods. When unset the limit is 250. <Flag name="historical-slasher-node" /> raises it to 4096.
+
+## Debug endpoints
+
+The debug namespace is on by default. It includes endpoints that return full beacon states (`/eth/v2/debug/beacon/states/{state_id}`), the fork choice dump, chain heads and data column sidecars. Checkpoint sync relies on the state endpoint: a node you want to use as someone else's `--checkpoint-sync-url` must keep it.
+
+<Flag name="disable-debug-rpc-endpoints" /> removes these routes and the Prysm debug gRPC service. Use it on nodes whose API others can reach and that don't serve checkpoint sync, because full states are large and expensive to serialize.
+
+## Light client
+
+<Flag name="enable-light-client" /> makes the node build and serve light client data: the `/eth/v1/beacon/light_client/*` Beacon API endpoints, the light client P2P requests and gossip topics. Turn it on if you want to support light clients; it costs some CPU and storage.
+
+## Expose APIs safely
+
+Neither API has authentication. Anyone who can reach the ports can read your node's data, submit messages, and (through the debug endpoints) make it do expensive work.
+
+- Keep the default `127.0.0.1` when the consumers run on the same host.
+- For Docker, bind to `0.0.0.0` inside the container but publish the port only on the host's loopback (`127.0.0.1:3500:3500`) or a private network.
+- For remote access, allow only specific source IPs in the firewall, or use a reverse proxy with authentication and TLS.
+- Don't expose gRPC to the internet. If the validator client is remote, use TLS and a private network or VPN.
+
+More detail is in [Expose APIs safely](/security/apis/).
+
+## Pitfalls
+
+- **Browser dashboard gets CORS errors with the default settings.** Only `http://localhost:3000` is effective by default. Set `--http-cors-domain` to your dashboard's exact origin.
+- **Validator client on another host can't connect.** `--rpc-host` (gRPC) or `--http-host` (REST) is still `127.0.0.1`.
+- **Long API calls are cut off after you add `--api-timeout`.** Heavy requests such as full state downloads can take longer than your timeout; raise it.

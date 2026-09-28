@@ -1,0 +1,178 @@
+---
+title: Ethrex
+description: Install and configure Ethrex, the Rust execution client by LambdaClass, for a Prysm beacon node on Hoodi, mainnet or Sepolia, and check that the two are connected.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Ethrex](https://docs.ethrex.xyz/) is the execution client written in Rust and maintained by [LambdaClass](https://github.com/lambdaclass/ethrex). It aims for a small, readable codebase, and the same client also runs as a ZK rollup (Ethrex L2). This page covers only Ethrex L1, the regular Ethereum execution client. Ethrex supports post-merge execution only: it can't execute proof-of-work blocks.
+
+<Aside type="caution" title="The newest client on this list">
+Ethrex's documentation calls it stable, and it has been [audited by Least Authority](https://github.com/lambdaclass/ethrex/tree/main/audits). It also has far fewer operators than the established clients, so it has seen less of mainnet's variety. Rehearse on Hoodi, follow its [releases](https://github.com/lambdaclass/ethrex/releases) closely, and check its [known issues](https://github.com/lambdaclass/ethrex/blob/main/docs/known_issues.md) before you stake on mainnet with it.
+</Aside>
+
+{/* Verified against Ethrex v27.0.0 (docs/CLI.md, docs/l1/running/*.md and cmd/ethrex/cli.rs at the v27.0.0 tag), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://docs.ethrex.xyz/getting-started/installation/index.html). On Linux x86-64, download the release binary:
+
+```bash
+curl -L https://github.com/lambdaclass/ethrex/releases/latest/download/ethrex-linux-x86_64 -o ethrex
+chmod +x ethrex
+```
+
+Use `ethrex-linux-aarch64` on ARM Linux and `ethrex-macos-aarch64` on Apple silicon, or install with Homebrew: `brew install lambdaclass/tap/ethrex`. The Docker image is `ghcr.io/lambdaclass/ethrex`. There is no Windows build. On x86-64, Ethrex needs a CPU with AVX2.
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Ethrex's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+ethrex \
+  --network hoodi \
+  --datadir $HOME/ethereum/execution \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+ethrex \
+  --network mainnet \
+  --datadir $HOME/ethereum/execution \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+ethrex \
+  --network sepolia \
+  --datadir $HOME/ethereum/execution \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+</Tabs>
+
+`--authrpc.addr` and `--authrpc.port` show the defaults. Ethrex appends the network name to `--datadir`, so Hoodi data ends up in `~/ethereum/execution/hoodi`. The JSON-RPC API is on by default at `127.0.0.1:8545`, with the `eth`, `net` and `web3` namespaces. If you run the downloaded binary from the `execution` folder, call `./ethrex`.
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--p2p.port`, `--discovery.port`) | Yes, for more peers |
+| 8551 | TCP | Engine API (`--authrpc.port`) | No |
+| 8545 | TCP | JSON-RPC (`--http.port`) | No |
+| 9090 | TCP | Metrics, with `--metrics` (`--metrics.port`) | No |
+
+The metrics server binds to `0.0.0.0` by default (`--metrics.addr`). If you enable metrics, set `--metrics.addr 127.0.0.1` or firewall the port. Port 9090 is also Prometheus's default; if Prometheus runs on the same host, move one of them.
+
+### Storage and sync
+
+Ethrex snap-syncs by default (`--syncmode snap`) and keeps only block headers below the snap-sync point. Full sync (`--syncmode full`) works on Hoodi but not on a fresh mainnet or Sepolia database. Keep the defaults for a staking node.
+
+Ethrex's [hardware requirements](https://docs.ethrex.xyz/getting-started/hardware_requirements.html) for the default profile:
+
+| Network | Disk (minimum) | Disk (recommended) | RAM (minimum) | RAM (recommended) |
+| --- | --- | --- | --- | --- |
+| Mainnet | 500 GB | 1 TB | 32 GB | 64 GB |
+| Sepolia | 250 GB | 400 GB | 32 GB | 64 GB |
+| Hoodi | 60 GB | 100 GB | 32 GB | 64 GB |
+
+The memory figures are higher than for most clients; plan the machine accordingly. Historical block bodies and receipts are opt-in with `--history.chain postmerge`, which adds about 1 TB on mainnet.
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. Ethrex lists Prysm among the consensus clients it works with. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+At startup, Ethrex logs where the Engine API listens:
+
+```text
+INFO Auth-RPC server listening on 127.0.0.1:8551
+```
+
+Once Prysm is connected and Ethrex is synced, it logs a performance line for every block it executes, starting with `[METRIC] BLOCK`, followed by the block number and hash.
+
+Ask Ethrex whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Ethrex is synced. While syncing, the result shows `startingBlock`, `currentBlock` and `highestBlock`.
+
+## Troubleshooting
+
+**`No messages from the consensus layer. Is the consensus client running?`**
+Ethrex hasn't heard from a beacon node for 30 seconds. Check that Prysm is running, points at port 8551, and shows no authentication errors.
+
+**`JWT secret not found in the provided path, generating JWT secret`.**
+The path given to `--authrpc.jwtsecret` doesn't exist, so Ethrex created a new secret there that Prysm doesn't know. Without the flag, Ethrex uses `jwt.hex` in the **current working directory**, so starting it from another folder silently creates another secret. Always pass an absolute path.
+
+**Full sync fails on mainnet.**
+Ethrex can't execute pre-merge blocks, so it can only snap-sync mainnet and Sepolia. Remove `--syncmode full`.
+
+**Ethrex won't start on an older x86-64 machine.**
+Check that the CPU supports AVX2, which Ethrex requires: `grep -c avx2 /proc/cpuinfo` prints `0` if it doesn't.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

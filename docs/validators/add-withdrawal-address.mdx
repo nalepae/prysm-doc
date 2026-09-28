@@ -1,0 +1,119 @@
+---
+title: "Add a withdrawal address to a legacy BLS (0x00) validator [TBR]"
+description: "Give a 0x00 validator a withdrawal address: sign a BLS-to-execution change with your mnemonic in the deposit CLI, then submit it with prysmctl."
+---
+
+import { Steps } from '@site/src/components/ui';
+import { SetupPicker, When } from '@site/src/components/SetupPicker';
+
+# Add a withdrawal address to a legacy BLS (`0x00`) validator [TBR]
+
+Validators created without a withdrawal address have `0x00` credentials. They earn rewards like any other validator, but nothing can be sent to an Ethereum address: neither the rewards nor, after an exit, the balance. To fix this, sign a change with your **mnemonic** in the deposit CLI, then submit it with `prysmctl`. It turns the validator into a regular (`0x01`) validator, with the withdrawal address you choose. You can do this once per validator.
+
+<SetupPicker groups="os net" nets="mainnet hoodi" />
+
+:::danger[The address is permanent]
+Use an address you control, never an exchange address, and compare every character. Only ever type your mnemonic into the deposit CLI on a machine you trust, ideally offline. Websites that offer to "help" with this step are phishing.
+:::
+
+## Check your credentials
+
+Ask your beacon node:
+
+<When os="unix">
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY> \
+  | jq '.data.validator.withdrawal_credentials'
+```
+
+</When>
+<When os="win">
+
+```powershell
+curl.exe -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY> |
+  jq '.data.validator.withdrawal_credentials'
+```
+
+</When>
+
+If they start with `0x00`, the validator has no withdrawal address yet: follow this page. If they start with `0x01` or `0x02`, it already has one, and you can't change it.
+
+## Set the withdrawal address
+
+<Steps>
+
+1. **Collect the inputs:** each validator's index and current `0x00` credentials (from the command above), and the key index of the first one in your mnemonic (usually `0`; it's the number in the keystore file name, `keystore-m_12381_3600_<INDEX>_0_0-...`).
+
+2. **Sign the change** with the [deposit CLI](/validators/create-keys/):
+
+   {/* Verified against ethstaker-deposit-cli v1.3.0 docs, 2026-09 */}
+   <When os="unix">
+
+   ```bash
+   ./deposit generate-bls-to-execution-change \
+     --chain={net} \
+     --validator_start_index=<FIRST_KEY_INDEX> \
+     --validator_indices=<VALIDATOR_INDEX_1>,<VALIDATOR_INDEX_2> \
+     --bls_withdrawal_credentials_list=<OLD_CREDENTIALS_1>,<OLD_CREDENTIALS_2> \
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   </When>
+   <When os="win">
+
+   ```powershell
+   .\deposit.exe generate-bls-to-execution-change `
+     --chain={net} `
+     --validator_start_index=<FIRST_KEY_INDEX> `
+     "--validator_indices=<VALIDATOR_INDEX_1>,<VALIDATOR_INDEX_2>" `
+     "--bls_withdrawal_credentials_list=<OLD_CREDENTIALS_1>,<OLD_CREDENTIALS_2>" `
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   </When>
+
+   It asks for your mnemonic and writes a file to `bls_to_execution_changes/`. Check that every `to_execution_address` in it is your address.
+
+3. **Submit it with prysmctl** to a synced beacon node (any client's REST API):
+
+   <When os="unix">
+
+   ```bash
+   ./prysm.sh prysmctl validator withdraw \
+     --beacon-node-host=http://127.0.0.1:3500 \
+     --path=<PATH_TO>/bls_to_execution_changes \
+     --accept-terms-of-use \
+     --confirm
+   ```
+
+   </When>
+   <When os="win">
+
+   ```powershell
+   .\prysm.bat prysmctl validator withdraw `
+     --beacon-node-host=http://127.0.0.1:3500 `
+     --path=<PATH_TO>\bls_to_execution_changes `
+     --accept-terms-of-use `
+     --confirm
+   ```
+
+   </When>
+
+   You should see:
+
+   ```text
+   INFO validator: Successfully published messages to update 2 withdrawal addresses.
+   ```
+
+</Steps>
+
+## Check that it works
+
+The change is usually included within minutes. Run the [credentials check](#check-your-credentials) again: the credentials now start with `0x01` and end with your address.
+
+## Troubleshooting
+
+**`generate-bls-to-execution-change` fails on the credentials.** The start index or the order of validator indices doesn't match your mnemonic's keys. Check the key index in your keystore file names.
+
+**prysmctl says the messages were not found in the pool.** They were probably already included. Check the credentials; if they're still `0x00` after an hour, submit again.

@@ -1,0 +1,109 @@
+---
+title: Validator lifecycle
+description: The states a validator moves through from deposit to withdrawal, the queues and delays between them, and the execution-layer requests that trigger exits, withdrawals and consolidations.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import ValidatorLifecycle from '@site/src/components/diagrams/ValidatorLifecycle';
+
+A validator starts with a deposit, waits in a queue, becomes active, and eventually exits and gets its balance back. Each step between those states is paced by the protocol, so that the validator set can only change slowly. This page describes the rules as of the Electra and Fulu forks.
+
+<ValidatorLifecycle />
+
+The code-style labels are the validator statuses reported by the standard Beacon API (`/eth/v1/beacon/states/head/validators`); a deposit still in the queue has no validator record yet. [Prysm's own statuses](#prysm-statuses) are slightly different.
+
+{/* Values verified against Prysm config/params/mainnet_config.go and beacon-chain/core/{electra,requests}, 2026-09. */}
+
+## Deposit
+
+You create a validator by sending ETH and the validator's deposit data to the deposit contract on the execution layer. See [Make a deposit](/validators/deposit/).
+
+Since Electra ([EIP-6110](https://eips.ethereum.org/EIPS/eip-6110)), deposits reach the beacon chain as **deposit requests** carried in the execution payload of the block that includes your transaction. The long delay of the old deposit voting mechanism, around 12 hours or more, is gone. Instead:
+
+1. The deposit joins the **pending deposit queue** in the beacon state as soon as its block is imported.
+2. It is processed only after that block is **finalized**, normally two epochs, about 13 minutes.
+3. Each epoch the chain processes pending deposits up to the **churn limit** (see below) and at most 16 of them. When many people deposit at once, this queue can take days or weeks to clear.
+
+A deposit for a new public key creates the validator record. A deposit for an existing validator is a **top-up** and goes through the same queue. The minimum deposit is 1 ETH, but a validator needs an effective balance of at least 32 ETH to be activated.
+
+## Pending
+
+Once its effective balance reaches 32 ETH, the validator becomes eligible for activation in the next epoch. When that epoch is finalized, the chain schedules activation `1 + MAX_SEED_LOOKAHEAD` = 5 epochs later, about 32 minutes. The lookahead gives everyone time to compute the new committees.
+
+## Active
+
+An active validator attests once per epoch, occasionally proposes a block, and is sometimes chosen for a sync committee. See [The life of a slot](/learn/life-of-a-slot/). Its rewards and penalties are computed from its **effective balance**: a rounded, slow-moving version of its actual balance (whole ETH, with hysteresis so small changes don't flip it back and forth).
+
+The effective balance is capped by the withdrawal credentials: 32 ETH for `0x00` and `0x01`, and 2,048 ETH for `0x02` compounding credentials ([EIP-7251](https://eips.ethereum.org/EIPS/eip-7251)). See [Keys and withdrawal credentials](/learn/keys-and-withdrawals/#withdrawal-credentials-0x00-0x01-and-0x02).
+
+## Exiting
+
+A validator leaves the active set in one of four ways:
+
+- **Voluntary exit.** A message signed with the validator's signing key, submitted through a beacon node. See [Exit a validator](/validators/exit/).
+- **Execution-layer exit request.** A transaction from the withdrawal address ([below](#execution-layer-requests)). Needs `0x01` or `0x02` credentials.
+- **Ejection.** Automatic, if the effective balance falls to 16 ETH, which in practice only happens after a long time offline during an inactivity leak, or after slashing.
+- **Slashing.** Forced, see [Rewards, penalties and slashing](/learn/rewards-penalties-slashing/#slashing).
+
+A validator can exit voluntarily only after it has been active for 256 epochs (about 27 hours), and not while it has partial withdrawals waiting in the queue. The exit is assigned an **exit epoch** at the end of the exit queue, which is paced by the same churn limit as activations. Until that epoch, the validator is still active and must keep performing its duties: don't stop your validator client when you submit the exit.
+
+## Exited and withdrawable
+
+After its exit epoch the validator has no more duties. It becomes **withdrawable** 256 epochs (about 27 hours) later. A slashed validator waits much longer: 8,192 epochs, about 36 days, so that correlated penalties can be applied first.
+
+Once withdrawable, and with `0x01` or `0x02` credentials, its whole balance is paid to the withdrawal address by the withdrawal sweep. A validator with `0x00` credentials stays in this state until you set an execution address.
+
+## Withdrawals
+
+Withdrawals are automatic. Each block includes up to 16 withdrawals, credited directly to withdrawal addresses without a transaction or gas:
+
+- **Queued partial withdrawals** first: amounts requested with execution-layer withdrawal requests, at most 8 per block.
+- **The sweep** fills the rest: the chain walks through the validator list in order, checking up to 16,384 validators per block, and pays out any excess balance (above 32 ETH for `0x01`, above 2,048 ETH for `0x02`) and the full balance of withdrawable validators.
+
+Because the sweep goes round the whole validator set, the time between two payouts to the same validator depends on the number of validators and is several days on mainnet. See [Withdrawals](/validators/withdrawals/).
+
+## The churn limit
+
+The protocol limits how much stake can enter or leave per epoch. Since Electra the limit is measured in ETH, not in number of validators:
+
+- **Balance churn:** the total active stake divided by 65,536, but at least 128 ETH.
+- **Activation and exit churn:** the balance churn, capped at 256 ETH per epoch. Deposits and exits each get this much per epoch.
+- **Consolidation churn:** what's left of the balance churn above the activation and exit cap.
+
+A large validator uses more of the churn than a small one: exiting a 2,048 ETH validator takes as much exit capacity as sixty-four 32 ETH validators.
+
+## Execution-layer requests
+
+Since Electra, a block's execution payload can carry **requests** for the consensus layer ([EIP-7685](https://eips.ethereum.org/EIPS/eip-7685)). They let the withdrawal address, a smart contract included, manage a validator without its signing key.
+
+| Request | Created by | Effect | Rules |
+| --- | --- | --- | --- |
+| **Deposit** ([EIP-6110](https://eips.ethereum.org/EIPS/eip-6110)) | Any deposit to the deposit contract | Creates or tops up a validator | See [Deposit](#deposit) |
+| **Withdrawal** ([EIP-7002](https://eips.ethereum.org/EIPS/eip-7002)) | A call to the withdrawal request contract from the withdrawal address | With amount `0`: a full exit. With an amount: a partial withdrawal | Full exit: `0x01` or `0x02` credentials, active for 256 epochs. Partial: `0x02` only, and the balance can't drop below 32 ETH |
+| **Consolidation** ([EIP-7251](https://eips.ethereum.org/EIPS/eip-7251)) | A call to the consolidation request contract from the source validator's withdrawal address | Moves the source validator's balance into a target validator, and exits the source | Target must have `0x02` credentials; both active and not exiting; source active for 256 epochs with no pending withdrawals. With source = target, it switches `0x01` to `0x02` instead |
+
+The request contracts charge a small fee in ETH that rises when many requests are queued, to limit spam. A request is only a message: if it breaks a rule, the consensus layer ignores it and the fee isn't refunded. Check the conditions before sending one. The step-by-step guides are in [Exit a validator](/validators/exit/) and [Withdrawals](/validators/withdrawals/).
+
+## Prysm statuses
+
+Prysm's validator client logs a status for each key, and its gRPC API uses the same names. They map to the Beacon API states roughly like this:
+
+| Prysm status | Meaning | Validator client log |
+| --- | --- | --- |
+| `UNKNOWN_STATUS` | The beacon node doesn't know the key: no deposit processed yet | `Waiting for deposit to be observed by beacon node` |
+| `DEPOSITED` / `PARTIALLY_DEPOSITED` | In the validator registry, not yet eligible for activation (`PARTIALLY_DEPOSITED` if below 32 ETH) | `Validator deposited, entering activation queue after finalization` |
+| `PENDING` | Eligible and waiting for its activation epoch | `Waiting for activation... Check validator queue status in a block explorer` |
+| `ACTIVE` | Active, no exit scheduled | `Validator activated` |
+| `EXITING` | Active, exit epoch scheduled | `Validator activated` |
+| `SLASHING` | Slashed, exit epoch not reached yet | `Validator status` with `status=SLASHING` |
+| `EXITED` | Past its exit epoch | `Validator exited` |
+
+{/* VERIFY: whether Prysm still reports DEPOSITED (rather than UNKNOWN_STATUS) for a deposit that is in the pending deposit queue but not yet in the registry after the EIP-6110 transition; status.go falls back to the eth1 deposit cache for keys missing from the state. */}
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Make a deposit" description="Fund a new validator." href="/validators/deposit/" />
+	<LinkCard title="Exit a validator" description="Leave the active set voluntarily." href="/validators/exit/" />
+	<LinkCard title="Withdrawals" description="Set credentials and receive your balance." href="/validators/withdrawals/" />
+</CardGrid>

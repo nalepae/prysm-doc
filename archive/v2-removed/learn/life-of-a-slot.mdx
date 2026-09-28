@@ -1,0 +1,103 @@
+---
+title: The life of a slot
+description: Step by step, what your beacon node, validator client and execution client do during one 12-second slot, and what happens at epoch boundaries.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import SlotTimeline from '@site/src/components/diagrams/SlotTimeline';
+
+Ethereum time is divided into **slots** of 12 seconds and **epochs** of 32 slots (6.4 minutes). In each slot one validator may propose a block, and one thirty-second of all validators attest to what they see as the head. This page follows one slot through your node.
+
+<SlotTimeline />
+
+{/* Timings verified against Prysm config/params/mainnet_config.go (SLOT_DURATION_MS 12000, ATTESTATION_DUE_BPS 3333, AGGREGATE_DUE_BPS 6667, SYNC_MESSAGE_DUE_BPS 3333, CONTRIBUTION_DUE_BPS 6667) and validator/client/attest.go, 2026-09. */}
+
+## The timeline at a glance
+
+| Time into the slot | What happens | Who |
+| --- | --- | --- |
+| Before the slot | The beacon node tells the execution client to start building a payload | Your node, if you propose next |
+| 0 s | The proposer's validator client requests, signs and publishes a block | One validator on the network |
+| 0–4 s | The block spreads over gossip; every node imports it | Every beacon node |
+| As soon as the block is valid, at the latest 4 s | Attesters sign and publish attestations; sync committee members sign the head | About 1/32 of validators; 512 sync committee members |
+| 8 s | Aggregators publish aggregate attestations and sync committee contributions | A few per committee |
+| 12 s | The next slot starts | |
+
+The 4 s and 8 s marks are one third and two thirds of the slot. Prysm stores them as basis points of the slot duration (3333 and 6667), so they follow the slot length if it ever changes.
+
+## Before the slot: getting ready to propose
+
+Proposers are known in advance: since Fulu, the beacon state carries the proposer schedule for the current and the next epoch, and the validator client fetches its duties for both. The validator client also tells the beacon node every validator's fee recipient.
+
+When a tracked validator is due to propose in the next slot, Prysm calls `engine_forkchoiceUpdated` with **payload attributes**: the timestamp, the fee recipient, the withdrawals to include, and a randomness value. The execution client starts assembling a block from its mempool and keeps improving it. Prysm logs `Forkchoice updated with payload attributes for proposal` when it does this.
+
+## 0 s: the proposer builds and publishes a block
+
+1. The validator client wakes up at the start of the slot, signs a RANDAO reveal (a signature over the epoch number) and asks the beacon node for a block.
+2. The beacon node calls `engine_getPayload` to collect the payload the execution client has been building, plus its blobs. If you use [MEV-Boost](/learn/mev-and-block-building/), the node also asks the relays for a bid and compares the two.
+3. The beacon node adds the consensus parts: attestations from its pool, slashings, exits, BLS-to-execution changes, the sync committee aggregate and execution requests. It computes the new state root and returns the unsigned block.
+4. The validator client checks the block against its slashing protection database and signs it. Prysm logs `Submitted new block` with the slot, block root and attestation count.
+5. The beacon node publishes the block to the consensus P2P network, together with the blob data as data column sidecars.
+
+The whole round trip usually takes well under a second. A block that arrives late risks being orphaned: if it isn't seen by most attesters before the 4 s mark, they vote for its parent instead, and the next proposer may build on the parent too.
+
+## 0–4 s: every node imports the block
+
+When your beacon node receives the block over gossip, it:
+
+1. Checks the signature and the consensus rules, and makes sure the blob data it is responsible for is available (see [Blobs and PeerDAS](/learn/blobs-and-peerdas/)).
+2. Sends the execution payload to the execution client with `engine_newPayload`. The EL executes every transaction and answers `VALID` or `INVALID` (or `SYNCING` if it can't tell yet).
+3. Adds the block to fork choice and recomputes the head.
+4. Calls `engine_forkchoiceUpdated` with the new head, safe and finalized blocks, so the EL updates its view of the canonical chain.
+
+Prysm logs `Synced new block` for each imported block.
+
+A block that arrives in the first third of the slot gets a temporary **proposer boost** in fork choice (40% of a committee's weight), which protects timely blocks from being reorged by a few late votes.
+
+## By 4 s: attestations
+
+Every active validator attests once per epoch, so in each slot about 1/32 of all validators are on duty, split into committees.
+
+Prysm's validator client doesn't wait for a fixed time: it attests as soon as the beacon node has a valid block for the slot, or at the 4 s mark if no block has arrived by then. For each validator on duty it:
+
+1. Requests attestation data from the beacon node: the head block root, plus the **source** (the latest justified checkpoint) and **target** (the checkpoint of the current epoch).
+2. Checks the data against slashing protection, signs it and submits it.
+3. The beacon node publishes it on one of 64 attestation subnets.
+
+If no block arrived, attesters vote for the previous head. That's correct behavior, not a failure: the proposer missed the slot.
+
+An attestation earns its full reward only if it is correct and included quickly: the head vote must be included in the next slot, the source vote within 5 slots, and the target vote by the end of the next epoch. See [Rewards, penalties and slashing](/learn/rewards-penalties-slashing/).
+
+### Sync committee messages
+
+If a validator is in the current **sync committee** (512 validators, rotated every 256 epochs, about 27 hours), it also signs the head block root each slot, on the same schedule as attestations. Light clients use these signatures to follow the chain cheaply.
+
+## At 8 s: aggregation
+
+Thousands of individual attestations would be too much for every node to download, so each committee elects about 16 **aggregators** by a verifiable lottery. At the 8 s mark, an aggregator's validator client asks the beacon node for the best aggregate of its committee's matching attestations, signs it and publishes it on a global topic. Sync committee aggregators do the same with **contributions**.
+
+The next proposer collects these aggregates and packs them into its block. That inclusion is what earns attesters their rewards.
+
+## Epochs, justification and finality
+
+Every 32 slots the chain processes an **epoch boundary**. Among other things, it:
+
+- **Justifies** the epoch's checkpoint (its first block) if validators with at least two thirds of the total stake voted for it as their target.
+- **Finalizes** the previous justified checkpoint when the next one is justified on top of it. In normal conditions a block becomes final after about two epochs, roughly 13 minutes. A finalized block can't be reverted without at least a third of all stake being slashed.
+- Applies rewards and penalties for the epoch's attestations, processes the deposit, exit and withdrawal queues, and updates effective balances.
+- Shuffles committees for future epochs. Duties are fixed at least one epoch in advance, which is why the validator client can fetch the next epoch's duties early.
+
+If finality stops for more than 4 epochs, the chain enters an [inactivity leak](/learn/rewards-penalties-slashing/#the-inactivity-leak) that drains offline validators until the online ones hold two thirds again.
+
+<Aside type="note" title="After Gloas">
+The upcoming Gloas fork (ePBS) changes the slot: blocks commit to a builder's bid and the payload is revealed separately, attestations move to 25% of the slot, aggregates to 50%, and a new payload timeliness committee votes at 75%. Prysm already contains these timings (`AttestationDueBPSGloas` and friends), but Gloas isn't scheduled on mainnet. See [MEV and block building](/learn/mev-and-block-building/#epbs-in-gloas).
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="How an Ethereum node works" description="The processes and APIs behind each step." href="/learn/how-a-node-works/" />
+	<LinkCard title="Rewards, penalties and slashing" description="What each duty earns, and what missing it costs." href="/learn/rewards-penalties-slashing/" />
+	<LinkCard title="Read the logs" description="Find these steps in Prysm's output." href="/operate/logs/" />
+</CardGrid>

@@ -1,0 +1,184 @@
+.slot-timeline {
+	display: block;
+	margin: 1.75rem 0;
+	border: 1px solid var(--site-color-gray-5);
+	border-radius: 1rem;
+	background: var(--site-color-bg-nav);
+	overflow: hidden;
+}
+.slot-timeline .st-frame {
+	overflow-x: auto;
+	padding: 0.9rem 0.75rem 0.25rem;
+}
+.slot-timeline svg {
+	display: block;
+	width: 100%;
+	min-width: 36rem;
+	height: auto;
+}
+.slot-timeline text {
+	font-family: var(--site-font);
+	fill: var(--site-color-gray-3);
+}
+.slot-timeline .st-band {
+	fill: color-mix(in srgb, var(--site-color-accent) 4%, transparent);
+}
+.slot-timeline .st-band-alt {
+	fill: color-mix(in srgb, var(--site-color-accent) 9%, transparent);
+}
+.slot-timeline .st-tick {
+	stroke: var(--site-color-hairline-light);
+}
+.slot-timeline .st-tick-major {
+	stroke: var(--site-color-gray-5);
+}
+.slot-timeline .st-sec {
+	font-size: 14px;
+	text-anchor: middle;
+	font-variant-numeric: tabular-nums;
+}
+.slot-timeline .st-phase {
+	font-size: 15px;
+	text-anchor: middle;
+	fill: var(--site-color-gray-2);
+	font-weight: 600;
+}
+.slot-timeline .st-lane {
+	stroke: var(--site-color-gray-5);
+	stroke-width: 1.5;
+}
+.slot-timeline .st-lane-name {
+	font-family: var(--prysm-display);
+	font-size: 18px;
+	font-weight: 650;
+	fill: var(--site-color-white);
+}
+.slot-timeline .st-lane-sub {
+	font-size: 13.5px;
+}
+.slot-timeline .st-msg {
+	cursor: pointer;
+	outline: none;
+}
+.slot-timeline .st-msg line {
+	stroke: var(--site-color-gray-4);
+	stroke-width: 2;
+	transition: stroke 0.2s;
+}
+.slot-timeline .st-msg circle {
+	fill: var(--site-color-gray-4);
+	transition: fill 0.2s, r 0.2s;
+}
+.slot-timeline .st-head {
+	fill: var(--site-color-gray-4);
+}
+.slot-timeline .st-hit {
+	fill: transparent;
+}
+.slot-timeline .st-msg.past line,
+.slot-timeline .st-msg.past circle {
+	stroke: color-mix(in srgb, var(--site-color-accent) 55%, var(--site-color-gray-4));
+	fill: color-mix(in srgb, var(--site-color-accent) 55%, var(--site-color-gray-4));
+}
+.slot-timeline .st-msg.on line {
+	stroke: var(--site-color-accent);
+	stroke-width: 3;
+}
+.slot-timeline .st-msg.on circle {
+	fill: var(--site-color-accent);
+	r: 7;
+}
+.slot-timeline .st-msg:focus-visible circle {
+	stroke: var(--site-color-accent-high);
+	stroke-width: 3;
+}
+.slot-timeline .st-playhead line {
+	stroke: var(--prysm-amber);
+	stroke-width: 2;
+}
+.slot-timeline .st-playhead circle {
+	fill: var(--prysm-amber);
+}
+
+.slot-timeline .st-panel {
+	border-top: 1px solid var(--site-color-gray-5);
+	padding: 0.9rem 1.1rem 1.1rem;
+	min-height: 11.5rem;
+}
+.slot-timeline .st-controls {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	margin-bottom: 0.6rem;
+}
+.slot-timeline .st-controls button {
+	font: inherit;
+	font-size: 0.85rem;
+	min-width: 2.4rem;
+	padding: 0.3rem 0.7rem;
+	border-radius: 0.45rem;
+	border: 1px solid var(--site-color-gray-5);
+	background: var(--site-color-bg);
+	color: var(--site-color-white);
+	cursor: pointer;
+}
+.slot-timeline .st-controls button:hover {
+	border-color: var(--site-color-accent);
+}
+.slot-timeline .st-clock {
+	margin-left: auto;
+	font-family: var(--site-font-mono);
+	font-size: 0.85rem;
+	color: color-mix(in srgb, var(--prysm-amber) 65%, var(--site-color-white));
+	font-variant-numeric: tabular-nums;
+}
+.slot-timeline .st-card[hidden] {
+	display: none;
+}
+.slot-timeline .st-card h4 {
+	margin: 0.2rem 0 0.35rem;
+	font-family: var(--prysm-display);
+	font-size: 1.15rem;
+	font-weight: 650;
+	color: var(--site-color-white);
+}
+.slot-timeline .st-card p {
+	margin: 0;
+	color: var(--site-color-gray-2);
+	line-height: 1.6;
+	max-width: 46rem;
+}
+.slot-timeline .st-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.3rem 0.75rem;
+	align-items: center;
+	font-size: 0.8rem;
+}
+.slot-timeline .st-who {
+	font-weight: 600;
+	padding: 0.05rem 0.5rem;
+	border-radius: 999px;
+	color: var(--site-color-white);
+	background: color-mix(in srgb, var(--site-color-accent) 20%, transparent);
+}
+.slot-timeline .st-who-everyone {
+	background: color-mix(in srgb, var(--prysm-mint) 22%, transparent);
+}
+.slot-timeline .st-who-attesters {
+	background: color-mix(in srgb, var(--prysm-violet) 24%, transparent);
+}
+.slot-timeline .st-who-aggregators {
+	background: color-mix(in srgb, var(--prysm-amber) 24%, transparent);
+}
+.slot-timeline .st-call {
+	margin-top: 0.5rem !important;
+}
+.slot-timeline .st-call code {
+	padding: 0;
+	border: 0;
+	background: none;
+	font-family: var(--site-font-mono);
+	font-size: 0.8rem;
+	color: var(--site-color-accent-high);
+}

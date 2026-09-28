@@ -1,0 +1,215 @@
+---
+title: Keymanager API
+description: Enable and authenticate the standard Keymanager API on the Prysm validator client, and call its endpoints for keystores, remote keys, fee recipients, gas limits, graffiti and exits.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The Keymanager API is the standard REST API that validator clients serve for managing keys while the client runs: import and delete keystores, register remote-signer keys, and set per-key fee recipients, gas limits and graffiti. Prysm's validator client implements it, so tools built for the standard (staking dashboards, key management scripts) work with Prysm.
+
+The authoritative request and response schemas are in the [Keymanager API specification](https://ethereum.github.io/keymanager-APIs/). This page covers how Prysm serves it and where Prysm's behavior differs. For a task-oriented walkthrough, see [Manage keys at runtime](/validators/keymanager/).
+
+## Enable the API
+
+The API is off by default. Start the validator client with <Flag name="rpc" bin="validator" />:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --rpc \
+  --wallet-dir=<WALLET_DIR> \
+  --keymanager-token-file=<WALLET_DIR>/auth-token
+```
+
+Replace `<WALLET_DIR>` with your wallet directory. Swap `--hoodi` for `--mainnet` on mainnet. The <Flag name="web" bin="validator" /> flag also enables the API, together with the web interface.
+
+| Setting | Flag | Default |
+| --- | --- | --- |
+| Listen address | <Flag name="http-host" bin="validator" /> | `127.0.0.1` |
+| Port | <Flag name="http-port" bin="validator" /> | `7500` |
+| Token file | <Flag name="keymanager-token-file" bin="validator" /> | `auth-token` in the **default** wallet directory |
+| Allowed browser origins | <Flag name="http-cors-domain" bin="validator" /> | `localhost`, `127.0.0.1` and `0.0.0.0` on ports 3000, 4200, 4242 and 7500 |
+
+The base URL is `http://127.0.0.1:7500`. On start, the validator logs where it keeps the token:
+
+```text
+INFO rpc: Validator Client auth token for gRPC and REST authentication set at /home/<USER>/.eth2validators/prysm-wallet-v2/auth-token
+INFO rpc: Initialized REST API routes
+```
+
+<Aside type="danger" title="Anyone with the token can remove your keys">
+The token lets a caller delete keystores and sign voluntary exits. Keep <Flag name="http-host" bin="validator" /> on `127.0.0.1`, keep the token file readable only by the validator's user, and never expose port 7500 to the internet. See [Expose APIs safely](/security/apis/).
+</Aside>
+
+## Authenticate
+
+Every `/eth/v1/*` request needs the token as a bearer token:
+
+```text
+Authorization: Bearer <TOKEN>
+```
+
+The token file holds a single line: a `0x`-prefixed, 256-bit hex string. If the file doesn't exist when the validator starts, Prysm creates it. Prysm also watches the file and picks up a new token without a restart.
+
+Read it into a shell variable for the examples below:
+
+```bash
+TOKEN=$(cat <WALLET_DIR>/auth-token)
+```
+
+To generate a new token, use `validator web generate-auth-token`:
+
+```bash
+./prysm.sh validator web generate-auth-token \
+  --wallet-dir=<WALLET_DIR>
+```
+
+<Aside type="caution" title="The token file ignores --wallet-dir">
+<Flag name="keymanager-token-file" bin="validator" /> always has a value, so the validator client writes the token to the default wallet location (`~/.eth2validators/prysm-wallet-v2/auth-token` on Linux, `~/Library/Eth2Validators/prysm-wallet-v2/auth-token` on macOS, `%LOCALAPPDATA%\Eth2Validators\prysm-wallet-v2\auth-token` on Windows) even when you pass a custom <Flag name="wallet-dir" bin="validator" />. Set <Flag name="keymanager-token-file" bin="validator" /> explicitly, or read the path from the log line above.
+</Aside>
+
+A missing header returns `401`, a header without the `Bearer ` prefix returns `400`, and a wrong token returns `403`.
+
+## Endpoints
+
+All paths are relative to `http://127.0.0.1:7500`. `{pubkey}` is a `0x`-prefixed 48-byte BLS public key.
+
+| Endpoint | Methods | Purpose |
+| --- | --- | --- |
+| `/eth/v1/keystores` | `GET` `POST` `DELETE` | List, import and delete local keystores |
+| `/eth/v1/remotekeys` | `GET` `POST` `DELETE` | List, add and remove remote-signer (Web3Signer) public keys |
+| `/eth/v1/validator/{pubkey}/feerecipient` | `GET` `POST` `DELETE` | Per-key fee recipient |
+| `/eth/v1/validator/{pubkey}/gas_limit` | `GET` `POST` `DELETE` | Per-key gas limit |
+| `/eth/v1/validator/{pubkey}/graffiti` | `GET` `POST` `DELETE` | Per-key graffiti |
+| `/eth/v1/validator/{pubkey}/builder_config` | `GET` `POST` `DELETE` | Per-key builder configuration (only on networks with the Gloas fork scheduled; otherwise `501`) |
+| `/eth/v1/validator/{pubkey}/voluntary_exit` | `POST` | Sign a voluntary exit and return it |
+
+`POST` to the fee recipient, gas limit, graffiti and builder config endpoints returns `202 Accepted`; `DELETE` returns `204 No Content`.
+
+### List keystores
+
+```bash
+curl -s \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+```json
+{"data":[{"validating_pubkey":"<PUBKEY>","derivation_path":"m/12381/3600/0/0/0"}]}
+```
+
+Prysm doesn't return the optional `readonly` field on this endpoint.
+
+### Import keystores
+
+The body carries each keystore as a JSON **string**, the matching passwords, and optionally a slashing protection history in [EIP-3076](https://eips.ethereum.org/EIPS/eip-3076) format, also as a string. This example builds the body with `jq`:
+
+```bash
+jq -n \
+  --rawfile ks <KEYSTORE_FILE> \
+  --arg pw "<KEYSTORE_PASSWORD>" \
+  --rawfile sp <SLASHING_PROTECTION_FILE> \
+  '{keystores: [$ks], passwords: [$pw], slashing_protection: $sp}' \
+| curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+Replace `<KEYSTORE_FILE>` with a `keystore-m_….json` file, `<KEYSTORE_PASSWORD>` with its password and `<SLASHING_PROTECTION_FILE>` with the history exported from the previous client. Drop the `--rawfile sp` line and the `slashing_protection` field if the keys have never signed.
+
+Each key gets a status of `imported`, `duplicate` or `error`:
+
+```json
+{"data":[{"status":"imported","message":""}]}
+```
+
+<Aside type="danger" title="Import slashing protection with the keys">
+If the keys were ever active in another client, stop that client first and import its slashing protection history in the same request. Running the same key in two places gets it slashed. See [Avoid slashing](/security/avoid-slashing/).
+</Aside>
+
+### Delete keystores
+
+```bash
+curl -s -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pubkeys":["<PUBKEY>"]}' \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+Each key gets a status of `deleted`, `not_active`, `not_found` or `error`. The response also contains `slashing_protection`, the EIP-3076 history for the deleted keys. Save it; you need it to move the keys to another client safely.
+
+### Set a fee recipient
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ethaddress":"<FEE_RECIPIENT_ADDRESS>"}' \
+  http://127.0.0.1:7500/eth/v1/validator/<PUBKEY>/feerecipient
+```
+
+Read it back with `GET` on the same path. `DELETE` removes the per-key value so the key falls back to the default fee recipient.
+
+### Set a gas limit or graffiti
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"gas_limit":"<GAS_LIMIT>"}' \
+  http://127.0.0.1:7500/eth/v1/validator/<PUBKEY>/gas_limit
+
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"graffiti":"<GRAFFITI>"}' \
+  http://127.0.0.1:7500/eth/v1/validator/<PUBKEY>/graffiti
+```
+
+### Sign a voluntary exit
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7500/eth/v1/validator/<PUBKEY>/voluntary_exit
+```
+
+Without an `epoch` query parameter, Prysm uses the current epoch. The response is a signed exit message. **Prysm doesn't broadcast it.** Submit it yourself to a beacon node with `POST /eth/v1/beacon/pool/voluntary_exits`, or follow [Exit a validator](/validators/exit/).
+
+## How Prysm behaves
+
+- **Changes persist.** Fee recipient, gas limit, graffiti and builder config changes are saved to the validator database and survive restarts. If you also pass <Flag name="proposer-settings-file" bin="validator" /> or <Flag name="proposer-settings-url" bin="validator" />, the file is merged on top at startup and can override or drop per-key values set through the API; the validator logs a warning listing the affected keys. See [Proposer settings file](/flags/proposer-settings/).
+- **Keystores need a local or HD wallet.** Importing into a validator that uses a remote signer returns an `error` status for each key.
+- **Remote keys need a remote signer.** `/eth/v1/remotekeys` works only when the validator runs with <Flag name="validators-external-signer-url" bin="validator" />. To make added keys survive restarts, also set <Flag name="validators-external-signer-key-file" bin="validator" />; without it, `POST` returns an `error` status for every key.
+- **One signer URL.** Prysm ignores the per-key `url` field in `POST /eth/v1/remotekeys` and logs a warning. Every key uses the signer set by <Flag name="validators-external-signer-url" bin="validator" />. See [Remote signer](/flags/remote-signer/).
+- **No wallet yet.** Before a wallet exists, keystore endpoints return `503` with `Prysm Wallet not initialized. Please create a new wallet.`
+
+Prysm-specific flows are also collected in the specification repository under [flows/client-specific/prysm](https://github.com/ethereum/keymanager-APIs/tree/master/flows/client-specific/prysm).
+
+## Check that it works
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+`200` means the API is up and your token is accepted.
+
+## Troubleshooting
+
+**`curl: (7) Failed to connect to 127.0.0.1 port 7500`.** The validator was started without <Flag name="rpc" bin="validator" /> or <Flag name="web" bin="validator" />, or <Flag name="http-port" bin="validator" /> points elsewhere. Look for `Initialized REST API routes` in the log.
+
+**`403 Forbidden: token value is invalid`.** You're reading a different token file from the one the validator uses. Take the path from the `auth token ... set at` log line, or set <Flag name="keymanager-token-file" bin="validator" /> explicitly.
+
+**`500 Validator client is not configured for Web3Signer`.** You called `/eth/v1/remotekeys` on a validator that uses local keys. Use `/eth/v1/keystores` instead.
+
+## Next steps
+
+- [Manage keys at runtime](/validators/keymanager/): step-by-step key workflows.
+- [Slashing protection history](/validators/slashing-protection/): export and import EIP-3076 files.
+- [Beacon API](/reference/apis/beacon-api/): the beacon node's standard API.

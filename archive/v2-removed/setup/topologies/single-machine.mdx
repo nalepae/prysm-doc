@@ -1,0 +1,147 @@
+---
+title: Node and validator on one machine
+description: Run an execution client, a Prysm beacon node and one Prysm validator client together on a single machine, with resource planning and what to back up.
+---
+
+import { Aside, Steps, FileTree, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+The most common setup: one machine runs the execution client, the Prysm beacon node and one Prysm validator client. All three talk over localhost, so the only ports you open to the internet are the peer-to-peer ones. One validator client can run many validator keys.
+
+<TopologyDiagram variant="single" />
+
+The [Quickstart](/get-started/quickstart/) builds exactly this setup with commands generated for your OS, network and client. This page walks through the same setup with the reasoning behind each step, then covers sizing and backups.
+
+## Before you begin
+
+- A machine that meets the [system requirements](/get-started/system-requirements/).
+- Your execution client chosen. Any of the [supported clients](/setup/connect-execution-client/#pick-your-execution-client) works; picking a less common one helps [client diversity](https://ethereum.org/developers/docs/nodes-and-clients/client-diversity/).
+- For staking: validator keys, or a plan to create them. See [Create validator keys](/validators/create-keys/).
+
+## Set up the machine
+
+<Steps>
+
+1. **Create the folder layout.**
+
+	```bash
+	mkdir -p ~/ethereum/consensus ~/ethereum/execution
+	```
+
+	<FileTree>
+	- ethereum/
+		- consensus/ prysm.sh, beacon and validator data
+		- execution/ execution client binary and data
+		- jwt.hex
+	</FileTree>
+
+2. **Install Prysm** into the `consensus` folder. See [Linux and macOS script](/install/prysm-sh/) or, on Windows, [Windows](/install/windows/).
+
+	```bash
+	cd ~/ethereum/consensus
+	curl https://raw.githubusercontent.com/OffchainLabs/prysm/master/prysm.sh --output prysm.sh && chmod +x prysm.sh
+	```
+
+3. **Create the JWT secret** that the beacon node and execution client share.
+
+	```bash
+	./prysm.sh beacon-chain generate-auth-secret --output-file=../jwt.hex
+	```
+
+	[Connect an execution client](/setup/connect-execution-client/) explains what the secret protects and how to set its permissions.
+
+4. **Start the execution client.** Follow the *Install* and *Configure* sections of your client's page, using `~/ethereum/execution` for its data and `~/ethereum/jwt.hex` for its JWT secret:
+
+	[Geth](/setup/execution-clients/geth/) · [Nethermind](/setup/execution-clients/nethermind/) · [Besu](/setup/execution-clients/besu/) · [Erigon](/setup/execution-clients/erigon/) · [Reth](/setup/execution-clients/reth/) · [Ethrex](/setup/execution-clients/ethrex/)
+
+	The execution client waits for a consensus client before it starts syncing, so start the beacon node next.
+
+5. **Start the beacon node** with checkpoint sync and your fee recipient:
+
+	```bash
+	cd ~/ethereum/consensus
+	./prysm.sh beacon-chain \
+	  --hoodi \
+	  --execution-endpoint=http://localhost:8551 \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+	  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+	```
+
+	For mainnet, use `--mainnet` and a mainnet checkpoint provider (see [Checkpoint sync](/setup/checkpoint-sync/)). Replace `<YOUR_WALLET_ADDRESS>` with the execution address that should receive priority fees and MEV. The beacon node's <Flag name="suggested-fee-recipient" /> is a fallback; the validator client's setting in step 8 is what normally applies.
+
+	Beacon node data goes to the default data directory. Add <Flag name="datadir" /> to keep it under `~/ethereum/consensus` instead.
+
+6. **Wait for both clients to sync.** The beacon node follows the chain within minutes of a checkpoint sync; the execution client takes hours to days depending on the client and disk. Check progress with:
+
+	```bash
+	curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+	```
+
+	Wait until `is_syncing` and `is_optimistic` are both `false` and `el_offline` is `false`.
+
+7. **Import your validator keys** into a Prysm wallet. See [Import keys into Prysm](/validators/import-keys/).
+
+	```bash
+	./prysm.sh validator accounts import --hoodi --keys-dir=<PATH_TO_VALIDATOR_KEYS>
+	```
+
+8. **Start the validator client.**
+
+	```bash
+	./prysm.sh validator \
+	  --hoodi \
+	  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+	```
+
+	The validator client connects to the beacon node on `127.0.0.1:4000` by default, so it needs no endpoint flag here. Add <Flag name="wallet-dir" bin="validator" /> if you imported into a non-default wallet.
+
+	Only now, with everything synced and the validator client running, [make your deposit](/validators/deposit/) if you haven't already.
+
+9. **Run everything as services** so the clients restart after crashes and reboots. See [Run with systemd](/setup/systemd/) or [Run with Docker Compose](/setup/docker-compose/).
+
+</Steps>
+
+## Check that it works
+
+- **Execution client:** its logs show it receiving fork-choice updates. Each client page has a *Check that it works* section with the log lines to expect.
+- **Beacon node:** `el_offline`, `is_syncing` and `is_optimistic` are all `false` in `/eth/v1/node/syncing`, and it logs `Synced new block` once per slot.
+- **Validator client:** once your validator is active, it logs `Submitted new attestations` for its duties and a `Previous epoch voting summary` each epoch. Look it up on [a block explorer](/resources/block-explorers/) too.
+
+[Check node and validator health](/operate/check-health/) covers each check in detail.
+
+## Plan resources
+
+Size the machine for the execution client and beacon node together; the validator client uses little extra CPU, memory or disk. [System requirements](/get-started/system-requirements/) has the numbers. On one machine, watch for these:
+
+- **Disk.** The execution client's database is the largest thing on the machine and keeps growing. Put both clients on the same fast NVMe SSD and alert when free space drops below what a few months of growth needs. Each client page links to its client's storage figures.
+- **Memory.** Both clients cache aggressively and grow into the RAM you give them. If the machine swaps, attestations arrive late. Some execution clients let you cap their cache size; see your client's documentation.
+- **Disk I/O during sync.** An execution client's initial sync is disk-bound. Avoid running other heavy workloads on the same disk until it's done.
+- **Bandwidth.** Attaching validators increases the data columns the beacon node custodies, and with it bandwidth. See [Bandwidth](/get-started/system-requirements/#bandwidth).
+- **Power and network.** One machine is one point of failure. A UPS and a wired connection prevent most unplanned downtime.
+
+## What to back up
+
+| Item | Where | Why | How often |
+| --- | --- | --- | --- |
+| Mnemonic (seed phrase) | Offline, on paper or metal | The only way to recreate keys and withdrawal credentials. | Once, when created. |
+| Keystores and their password | `validator_keys/` from key generation | Re-import without the mnemonic. | Once per new key. |
+| Wallet password | Your password manager | Unlocks the Prysm wallet. | When it changes. |
+| Slashing protection history | Exported with `validator slashing-protection-history export` | Required when moving keys to another machine or client. | Before any migration. See [Slashing protection history](/validators/slashing-protection/). |
+| Service files, config files, proposer settings | `/etc/systemd/system/`, your config paths | Rebuild the setup quickly. | When they change. |
+
+You don't need to back up the execution client or beacon node databases: a checkpoint sync rebuilds the beacon node in minutes, and the execution client resyncs. You also don't need to keep `jwt.hex`; generate a new one and point both clients at it.
+
+<Aside type="danger" title="Restoring is where slashing happens">
+When you restore validator keys on a new machine, make sure the old machine can never start again with the same keys, and import the slashing protection history before the new validator client signs anything. See [Move to a new machine](/operate/move-to-new-machine/) and [Back up and restore](/operate/backup-and-restore/).
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Run with systemd" description="Keep the clients running across reboots." href="/setup/systemd/" />
+	<LinkCard title="Peers, ports and NAT" description="Open P2P ports for more peers." href="/setup/networking/" />
+	<LinkCard title="Use MEV-Boost" description="Get blocks from external builders." href="/validators/mev-boost/" />
+	<LinkCard title="Metrics and dashboards" description="Prometheus and Grafana for Prysm." href="/operate/metrics/" />
+</CardGrid>

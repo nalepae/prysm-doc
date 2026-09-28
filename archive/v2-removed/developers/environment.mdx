@@ -1,0 +1,194 @@
+---
+title: Set up your environment
+description: Install Bazelisk and the other tools Prysm development needs, clone the repository, configure gopls, and learn the named Bazel configs the repository defines.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@site/src/components/ui';
+
+Set up a machine that can build and test Prysm with Bazel, and an editor that understands the code. You need this once per machine.
+
+## Before you begin
+
+- A **Linux** (x86-64 or ARM64) or **macOS** (Apple silicon or Intel) machine. Windows isn't a supported build host; you can [cross-compile](/developers/build/#cross-compile) Windows binaries from Linux instead.
+- `git`, and a working internet connection for the first build, which downloads the toolchains and every dependency.
+- Plenty of free disk space. Bazel keeps its output and download caches under `~/.cache/bazel` on Linux and `/private/var/tmp/_bazel_$USER` on macOS, and they grow with every configuration you build.
+
+## What you need to install
+
+| Tool | Version | Why |
+| --- | --- | --- |
+| [Bazelisk](https://github.com/bazelbuild/bazelisk) | Any recent release | Downloads and runs the Bazel version pinned in the repository's `.bazelversion` (currently `7.4.1`). Install it as `bazel` on your `PATH`. |
+| Go | The version in `go.mod` (currently `1.26.5`) | Bazel downloads its own Go SDK for builds. You need a local Go for your editor (`gopls`), `gofmt`/`goimports`, and tools run with `go tool`. |
+| C/C++ compiler | macOS only: Xcode Command Line Tools | On Linux, Bazel uses a hermetic Zig-based C toolchain (`hermetic_cc_toolchain`) and ignores the system compiler. On macOS, Bazel uses the local Apple toolchain, so install it with `xcode-select --install`. |
+| Docker | Any recent release | Only for [building images](/developers/docker-images/), the [local devnet](/developers/local-devnet/) and the Kurtosis end-to-end test. |
+
+<Aside type="note">
+The Go version that Bazel uses comes from `go_register_toolchains(go_version = …)` in `WORKSPACE`, and the Bazel version from `.bazelversion`. Both are kept in step with `go.mod`, so you don't need to install either by hand.
+</Aside>
+
+## Set up the machine
+
+<Steps>
+
+1. Install Bazelisk as `bazel`.
+
+   <Tabs syncKey="os">
+   <TabItem label="Linux, macOS">
+   On macOS with Homebrew:
+
+   ```bash
+   brew install bazelisk
+   ```
+
+   Anywhere Go is installed, the way Prysm's CI does it:
+
+   ```bash
+   go install github.com/bazelbuild/bazelisk@latest
+   ln -sf "$(go env GOPATH)/bin/bazelisk" "$HOME/bin/bazel"
+   ```
+
+   Make sure `$HOME/bin` is on your `PATH`.
+   </TabItem>
+   <TabItem label="Windows">
+   Windows isn't a supported build host. Use a Linux machine or VM.
+   </TabItem>
+   </Tabs>
+
+2. Clone the repository and switch to `develop`, the branch pull requests target.
+
+   ```bash
+   git clone https://github.com/OffchainLabs/prysm.git
+   cd prysm
+   git checkout develop
+   ```
+
+   If you plan to contribute, fork the repository on GitHub first and add your fork as a remote. See [Contribute a change](/developers/contributing/).
+
+3. Check that Bazelisk picked up the pinned version. The first run downloads Bazel.
+
+   ```bash
+   bazel version
+   ```
+
+   You should see:
+
+   ```text
+   Bazelisk version: …
+   Build label: 7.4.1
+   ```
+
+4. Fetch the dependencies and check the toolchain by listing the binaries' targets.
+
+   ```bash
+   bazel query 'kind(go_binary, //cmd/...)'
+   ```
+
+   You should see:
+
+   ```text
+   //cmd/beacon-chain:beacon-chain
+   //cmd/client-stats:client-stats
+   //cmd/prysmctl:prysmctl
+   //cmd/validator:validator
+   ```
+
+</Steps>
+
+## Set up your editor
+
+Prysm checks its generated code (`.pb.go`, `.ssz.go`, mocks) into the repository, so the standard Go language server, `gopls`, works on the module directly. You don't need a Bazel-aware packages driver for day-to-day editing.
+
+A few settings avoid common problems. In VS Code, add them to `.vscode/settings.json` in your clone:
+
+```json title=".vscode/settings.json"
+{
+  "gopls": {
+    "build.directoryFilters": [
+      "-bazel-bin",
+      "-bazel-out",
+      "-bazel-prysm",
+      "-bazel-testlogs"
+    ]
+  }
+}
+```
+
+- **Exclude the Bazel symlinks.** Bazel creates `bazel-bin`, `bazel-out`, `bazel-prysm` and `bazel-testlogs` in the repository root. They point into the output base and contain copies of the source, which makes `gopls` slow and gives you duplicate search results. Other editors that use `gopls` accept the same `directoryFilters` setting.
+- **Pick a preset with build tags.** Some files exist in two versions, one for the mainnet preset (`//go:build !minimal`) and one for the minimal preset (`//go:build minimal`). By default your editor shows the mainnet version. To work on minimal-preset code, add `"build.buildFlags": ["-tags=minimal"]` to the `gopls` settings.
+- **Other build tags.** Files guarded by `fake_crypto`, `fuzz`, `develop` or `bazel` are only compiled with those tags. Add the tag to `build.buildFlags` if you need to edit one.
+- **Formatting.** CI checks `gofmt` and `goimports`. Configure your editor to run `goimports` on save.
+
+GoLand and IntelliJ work the same way when you open the repository as a Go module.
+
+## Bazel configuration in the repository
+
+The root `.bazelrc` imports six fragments from `build/bazelrc/` and defines named configs. You select a named config with `--config=<name>`.
+
+### Defaults that apply to every command
+
+| Setting | Effect |
+| --- | --- |
+| `--keep_going` | Builds and tests every target it can, instead of stopping at the first failure. |
+| `--test_output=errors` | Prints the log of failing tests to the terminal. |
+| `--build_tests_only` | `bazel test` builds only what the selected tests need. |
+| `--sandbox_default_allow_network=false` | Build actions and tests run without network access. Targets that need it are tagged `requires-network`. |
+| `--test_verbose_timeout_warnings` | Warns when a test's size is much larger than its run time needs. |
+| `--incompatible_strict_action_env` | Actions get a fixed `PATH`, so a change to your shell environment doesn't invalidate the cache. |
+| `--workspace_status_command=./hack/workspace_status.sh` | Provides the git commit and tag used when a build is stamped. |
+| `--define gotags=bazel` | Compiles with the `bazel` build tag. |
+
+### Named configs
+
+| Config | What it does | Use it for |
+| --- | --- | --- |
+| `release` | `-c opt`, `--stamp` (git commit and tag in the version string), profile-guided optimization for `beacon-chain`, stripped binaries. | Binaries you run for real or benchmark. |
+| `minimal` | Builds with the minimal preset (`--//proto:network=minimal` and the `minimal` Go build tag). | Local devnets and tests that use the minimal preset. |
+| `blst_disabled` | Builds without the blst BLS library. | Checking code paths that must not depend on blst. |
+| `cgo_symbolizer` | `-c dbg` with C debug symbols and the cgo symbolizer. | Readable stack traces and profiles that go through C code. |
+| `debug` | For builds: sandbox debugging, toolchain resolution debugging, verbose failures and printed commands. For tests: streamed output, one test at a time, no timeout, no cached results. | Diagnosing a failing build action, or watching a test live. |
+| `e2e` | Adds the `debug` Go build tag to tests. | End-to-end tests. |
+| `linux_amd64`, `linux_arm64`, `osx_amd64`, `osx_arm64`, `windows_amd64` | Cross-compile for that platform. All but `linux_amd64` also enable `cross`. | Release binaries for other platforms. See [Cross-compile](/developers/build/#cross-compile). |
+| `<platform>_docker` | The same, with every action run in a Docker sandbox. Linux x86-64 hosts only, and very slow. | Cross-compiling without installing the cross toolchains. |
+| `remote`, `docker-sandbox` | Remote execution with Docker fallback, or Docker sandboxing alone. | CI-style setups. |
+
+Configs combine: `bazel build --config=release --config=minimal //cmd/beacon-chain` builds an optimized minimal-preset beacon node.
+
+### Your own settings
+
+Put personal flags in `~/.bazelrc`. Bazel reads it after the repository's `.bazelrc`, so your settings win, and it isn't part of the repository. A shared disk cache is the most useful one: it keeps build results across `bazel clean` and across several clones.
+
+```bash title="~/.bazelrc"
+build --disk_cache=~/.cache/bazel-disk
+```
+
+## Check that it works
+
+Build the beacon node. The first build takes a while because it compiles every dependency, including the C libraries.
+
+```bash
+bazel build //cmd/beacon-chain
+```
+
+It ends with:
+
+```text
+Target //cmd/beacon-chain:beacon-chain up-to-date:
+  bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain
+INFO: Build completed successfully, …
+```
+
+## Troubleshooting
+
+**`bazel: command not found` after installing Bazelisk with `go install`.** The binary is called `bazelisk` and lives in `$(go env GOPATH)/bin`. Create the `bazel` symlink from step 1 and put its directory on your `PATH`.
+
+**`xcrun: error: invalid active developer path` on macOS.** The Xcode Command Line Tools are missing. Run `xcode-select --install`, then `bazel clean --expunge` so Bazel detects the toolchain again.
+
+**Your editor reports thousands of duplicate packages.** `gopls` is indexing the `bazel-*` symlinks. Add the `directoryFilters` shown above.
+
+**A test fails with a network error only under Bazel.** The sandbox blocks network access. If the test really needs the network, it must be tagged `requires-network` in its `BUILD.bazel`.
+
+## Next steps
+
+- [Build with Bazel](/developers/build/)
+- [Run from source](/developers/run-from-source/)
+- [Unit tests](/developers/unit-tests/)

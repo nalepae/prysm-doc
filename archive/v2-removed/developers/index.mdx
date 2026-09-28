@@ -1,0 +1,73 @@
+---
+title: Developer guide
+description: Build, test, run and change Prysm from source with Bazel, with a tour of the repository layout and a suggested path through the guide.
+---
+
+import { LinkCard, CardGrid, FileTree } from '@site/src/components/ui';
+
+This guide is for people who want to work on Prysm itself: fix a bug, add a feature, run the test suites, or build their own binaries and container images. If you only want to run a node from source, [Build from source](/install/source/) is shorter.
+
+Everything here uses [Bazel](https://bazel.build), the build system Prysm's CI and release pipeline use. Bazel pins the Go toolchain, the C toolchain and every dependency, so a build on your machine matches the one that ships. Prysm's build tooling is evolving; check [`CONTRIBUTING.md`](https://github.com/OffchainLabs/prysm/blob/develop/CONTRIBUTING.md) in the repository for the latest guidance.
+
+## Path through the guide
+
+1. [Set up your environment](/developers/environment/): install Bazelisk, clone the repository, configure your editor.
+2. [Build with Bazel](/developers/build/): build `beacon-chain`, `validator` and `prysmctl`, and learn the build configs.
+3. [Run from source](/developers/run-from-source/): start a beacon node and validator from your working tree, and attach a debugger.
+4. Test your change: [unit tests](/developers/unit-tests/), [spec tests](/developers/spec-tests/) and [end-to-end tests](/developers/e2e-tests/).
+5. [Regenerate code](/developers/code-generation/) if you touched `.proto` files, SSZ types or interfaces that have mocks.
+6. Try the change on a [local devnet](/developers/local-devnet/) with other clients, using [images you built](/developers/docker-images/).
+7. [Contribute the change](/developers/contributing/): changelog fragment, checks and pull request.
+
+When something misbehaves, see [Debugging and profiling](/developers/debugging/).
+
+## Repository layout
+
+The repository is a single Go module, `github.com/OffchainLabs/prysm/v7`. Every directory with Go code also has a `BUILD.bazel` file.
+
+<FileTree>
+- api/ REST server plumbing, API types, and Go clients for the Beacon and builder APIs
+- async/ event feeds and concurrency helpers
+- beacon-chain/ the beacon node
+  - blockchain/ block processing and fork choice integration
+  - core/ state transition, per fork
+  - db/ BoltDB store (`kv/`) and blob and data column files (`filesystem/`)
+  - execution/ Engine API client for the execution client
+  - forkchoice/ fork choice store
+  - node/ wires every service together at startup
+  - p2p/ libp2p host, discovery, gossipsub
+  - rpc/ Beacon API, Prysm API and gRPC servers
+  - state/ beacon state types and state generation
+  - sync/ gossip handling, req/resp, initial sync and backfill
+  - …
+- build/ Bazel helpers and shared `.bazelrc` fragments (`build/bazelrc/`)
+- changelog/ one changelog fragment per pull request
+- cmd/ entry points: `beacon-chain`, `validator`, `prysmctl`, `client-stats`, and shared flags
+- config/ chain parameters (`params/`), feature flags (`features/`), fee recipient and proposer settings
+- consensus-types/ blocks, primitives and other shared consensus types
+- container/ generic data structures (tries, queues, linked lists, multi-value slices)
+- crypto/ BLS, hashing, keystores, ECDSA and randomness
+- encoding/ SSZ helpers and byte utilities
+- hack/ maintenance and CI scripts
+- io/ file and log helpers
+- monitoring/ Prometheus, tracing and client stats
+- proto/ protobuf definitions and the generated `.pb.go` and `.ssz.go` files
+- runtime/ service registry, logging, version and debug (pprof) support
+- testing/ assertions, mocks, test utilities, spec tests (`spectest/`) and end-to-end tests (`endtoend/`)
+- third_party/ patches and vendored code
+- tools/ developer tools, Bazel rules (`prysm_image.bzl`, `download_spectests.bzl`) and static analyzers
+- validator/ the validator client, key managers, slashing protection and its APIs
+- WORKSPACE Bazel external dependencies and toolchains
+- deps.bzl Go dependencies for Bazel, generated from `go.mod`
+- .bazelrc imports `build/bazelrc/*` and defines the named `--config` options
+- .bazelversion the Bazel version Bazelisk downloads
+</FileTree>
+
+The `develop` branch holds the latest merged work, and pull requests target it. `master` points at the latest stable release.
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Set up your environment" description="Bazelisk, the repository and your editor." href="/developers/environment/" />
+	<LinkCard title="Contribute a change" description="Changelog fragments, checks and the pull request process." href="/developers/contributing/" />
+</CardGrid>

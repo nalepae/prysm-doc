@@ -1,0 +1,73 @@
+---
+title: "Withdrawals and consolidation [TBR]"
+description: "Check your withdrawal credentials, understand automatic withdrawals, and upgrade or consolidate validators to 0x02 compounding."
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Withdrawals send ETH from your validator to its **withdrawal address**. The regular ones are automatic: you don't send a transaction, and they cost no gas. What gets paid, and when, depends on the validator's **withdrawal credentials**.
+
+## Check your credentials
+
+Ask your beacon node:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY> \
+  | jq '.data.validator.withdrawal_credentials'
+```
+
+The start tells you the type, and the last 40 hex characters are the withdrawal address:
+
+| Credentials | Paid automatically | On request from the withdrawal address |
+| --- | --- | --- |
+| `0x00…` (legacy) | Nothing, until you [add an address](/validators/add-withdrawal-address/) | Nothing |
+| `0x01…` (regular) | Everything above 32 ETH while active; the full balance after exit | Full exit |
+| `0x02…` (compounding) | Everything above 2048 ETH while active; the full balance after exit | Full exit, partial withdrawal, consolidation |
+
+Once set, the withdrawal address can't be changed.
+
+## Automatic withdrawals
+
+The network goes through all validators in turn and pays out what each one has to withdraw. On mainnet a full round takes several days, so expect a payment every few days to a week or more. You don't need to do anything.
+
+- **Partial withdrawal:** an active validator's balance above its maximum (32 ETH for `0x01`, 2048 ETH for `0x02`) is paid out.
+- **Full withdrawal:** after you exit, the whole balance is paid out.
+
+Withdrawals aren't transactions. On a block explorer, look for them under "withdrawals" for your validator or address.
+
+## Add a withdrawal address to a `0x00` validator
+
+A `0x00` validator earns rewards, but nothing can be withdrawn until you give it a withdrawal address. See [Add a withdrawal address to a legacy BLS (`0x00`) validator](/validators/add-withdrawal-address/).
+
+## Compounding (`0x02`) and consolidation
+
+A compounding validator keeps its rewards staked, up to 2048 ETH, so they earn rewards too. It also lets you run one validator instead of several.
+
+- **New validators:** create keys with `--compounding`. See [Create validator keys](/validators/create-keys/).
+- **Upgrade a `0x01` validator** to `0x02` in place. This is one-way: afterwards, rewards above 32 ETH are no longer paid out automatically; you request a partial withdrawal when you want them.
+- **Consolidate** validator A into validator B: A's balance moves to B, and A exits. B must have `0x02` credentials, and both must share the same withdrawal address.
+- **Partial withdrawal** from a `0x02` validator: withdraw a chosen amount, as long as 32 ETH stays.
+
+All four requests are sent **from your withdrawal address**, not from Prysm. The simplest way is **Validator actions** on the Staking Launchpad (`https://launchpad.ethereum.org/en/validator-actions`, or the same page on the Hoodi launchpad): connect the wallet that controls the withdrawal address, pick the validator and the action. Each request costs a small fee. When many requests are waiting, processing can take days.
+{/* Verified against ethereum/staking-launchpad (dev branch, src/pages/Actions and src/utils/envVars.ts), 2026-09 */}
+
+:::caution[Consolidation exits the source]
+Keep B's validator running. Stop A's validator client only after A has exited. Try a consolidation on Hoodi first.
+:::
+
+## Check that it works
+
+- **Credentials:** run the credentials check after each change.
+- **Pending requests:** your beacon node shows queued partial withdrawals and consolidations:
+
+  ```bash
+  curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/pending_partial_withdrawals | jq
+  curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/pending_consolidations | jq
+  ```
+
+- **Payments:** block explorers such as [beaconcha.in](https://beaconcha.in) list withdrawals per validator and per address.
+
+## Troubleshooting
+
+**No withdrawals arrive.** Check the credentials: nothing is withdrawn from a `0x00` validator. A new `0x01` validator has little above 32 ETH to pay out. A `0x02` validator pays nothing automatically until it exceeds 2048 ETH.

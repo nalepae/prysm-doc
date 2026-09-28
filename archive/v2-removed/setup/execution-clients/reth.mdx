@@ -1,0 +1,180 @@
+---
+title: Reth
+description: Install and configure Reth as the execution client for a Prysm beacon node on Hoodi, mainnet or Sepolia, and check that the two are connected.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Reth](https://reth.rs/) is the execution client written in Rust and maintained by Paradigm. It is built as a modular library as well as a node, syncs in stages, and offers archive, full and minimal storage modes.
+
+Unlike most clients, **Reth runs an archive node by default**. For a staking node, add `--full`.
+
+{/* Verified against Reth v2.7.0 (CLI reference at reth.rs/cli/reth/node, log lines in crates/node/events/src/node.rs at the v2.7.0 tag), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://reth.rs/installation/overview). The most common methods are the pre-built binaries from [GitHub releases](https://github.com/paradigmxyz/reth/releases), Homebrew on macOS and Linux:
+
+```bash
+brew install paradigmxyz/brew/reth
+```
+
+or the `ghcr.io/paradigmxyz/reth` Docker image. The v2.7.0 release publishes binaries for Linux (x86-64 and ARM64) and Apple silicon macOS only; there is no Windows build. Release archives are signed; the [binaries page](https://reth.rs/installation/binaries) explains how to verify them.
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Reth's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+reth node \
+  --chain hoodi \
+  --datadir $HOME/ethereum/execution \
+  --full \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex \
+  --http \
+  --http.api eth,net,web3
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+reth node \
+  --chain mainnet \
+  --datadir $HOME/ethereum/execution \
+  --full \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex \
+  --http \
+  --http.api eth,net,web3
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+reth node \
+  --chain sepolia \
+  --datadir $HOME/ethereum/execution \
+  --full \
+  --authrpc.addr 127.0.0.1 \
+  --authrpc.port 8551 \
+  --authrpc.jwtsecret $HOME/ethereum/jwt.hex \
+  --http \
+  --http.api eth,net,web3
+```
+
+</TabItem>
+</Tabs>
+
+`--authrpc.addr` and `--authrpc.port` show the defaults. Reth opens no JSON-RPC port unless you pass `--http`, which listens on `127.0.0.1:8545`; you use it below to check sync status. If you run the unpacked binary from the `execution` folder, call `./reth node`.
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--port`, `--discovery.port`) | Yes, for more peers |
+| 8551 | TCP | Engine API (`--authrpc.port`) | No |
+| 8545 | TCP | JSON-RPC, with `--http` (`--http.port`) | No |
+| Your choice | TCP | Metrics, with `--metrics <ADDRESS>:<PORT>` | No |
+
+### Storage
+
+| Mode | Flag | Keeps |
+| --- | --- | --- |
+| Archive (default) | none | All history from genesis |
+| Full | `--full` | Current state and the last 10,064 blocks of state history; prunes pre-merge block bodies |
+| Minimal | `--minimal` | The most aggressive built-in pruning |
+
+Use `--full` for a staking node. Pruning is destructive: data that has been pruned can only come back from a snapshot or a resync. Reth's [system requirements](https://reth.rs/run/system-requirements) list, as of 2025-06-23, at least 1.2 TB for a mainnet full node and 2.8 TB for an archive node, on TLC NVMe. See [Pruning and node modes](https://reth.rs/run/storage/pruning).
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+Reth waits for the consensus client before it syncs. Once Prysm is connected, Reth logs fork-choice updates, and once it's synced, every block:
+
+```text
+INFO Forkchoice updated head_block_hash=0x... safe_block_hash=0x... finalized_block_hash=0x...
+INFO Received new payload from consensus engine number=... hash=0x...
+INFO Block added to canonical chain number=... hash=0x... peers=... txs=... gas_used=... elapsed=...
+```
+
+While syncing, the fork-choice line reads `Received forkchoice updated message when syncing`.
+
+Ask Reth whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Reth is synced.
+
+## Troubleshooting
+
+**`Post-merge network, but never seen beacon client. Please launch one to follow the chain!`**
+Reth has received nothing from a beacon node. Check that Prysm is running, points at port 8551, and shows no authentication errors.
+
+**`Beacon client online, but no consensus updates received for a while.`**
+Prysm reached Reth earlier but stopped sending updates. Check the beacon node logs for errors or a restart loop.
+
+**Prysm reports `401 Unauthorized`.**
+The secrets differ. Without `--authrpc.jwtsecret`, Reth generates its own `jwt.hex` in its data directory, under a folder named after the chain. Pass the same file to both clients.
+
+**The disk fills up much faster than expected.**
+Reth is running as an archive node because `--full` is missing. Add `--full`; the simplest way to reclaim the space is to stop Reth, delete its data directory, and sync again with `--full`.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

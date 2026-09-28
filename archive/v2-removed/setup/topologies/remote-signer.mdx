@@ -1,0 +1,199 @@
+---
+title: Validator with a remote signer
+description: Run the Prysm validator client with Web3Signer holding the validator keys, including Web3Signer setup, slashing protection in PostgreSQL, and key management through the Keymanager API.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+With a remote signer, the Prysm validator client never holds private keys. It works out what to sign from the beacon node's duties, then sends each signing request over HTTP to [Web3Signer](https://docs.web3signer.consensys.io/), which holds the keys, checks its own slashing protection database, and returns the signature. Use this when keys must live on a separate, hardened host, in a cloud key vault or HSM, or when one team manages keys for validator clients run by another.
+
+<TopologyDiagram variant="remote-signer" />
+
+Prysm speaks the [remote signing API](https://github.com/ethereum/remote-signing-api) that Web3Signer implements. Things to know before you start:
+
+- A validator client uses **either** local keys **or** Web3Signer. When <Flag name="validators-external-signer-url" bin="validator" /> is set, Prysm doesn't load keys from a local wallet, so you don't need one.
+- The validator client **keeps its own slashing protection database** (`validator.db` in <Flag name="datadir" bin="validator" />) and checks every attestation and block against it before asking Web3Signer to sign. Web3Signer then checks again against its database. You get two layers.
+- Signing adds a network round trip to every duty. Keep Web3Signer close to the validator client, on the same host or LAN.
+
+## Before you begin
+
+- A synced Prysm beacon node and execution client. See [Node and validator on one machine](/setup/topologies/single-machine/).
+- Your validator keystores and their passwords. See [Create validator keys](/validators/create-keys/).
+- Java 25 or later on the Web3Signer host, or Docker.
+- PostgreSQL for Web3Signer's slashing protection database.
+
+{/* Verified against Web3Signer 26.7.0 (docs in Consensys-Incorporated/doc.web3signer, main branch), 2026-09 */}
+
+## Set up Web3Signer
+
+These steps cover the essentials for keystore files on disk. Web3Signer also supports HashiCorp Vault, AWS, Azure and GCP; see its [key storage docs](https://docs.web3signer.consensys.io/).
+
+<Steps>
+
+1. **Install Web3Signer.** Download the release archive from [GitHub releases](https://github.com/Consensys-Incorporated/web3signer/releases/latest), unpack it, and check it runs:
+
+	```bash
+	bin/web3signer --help
+	```
+
+	Or use the `consensys/web3signer` Docker image, pinned to a release tag.
+
+2. **Create the slashing protection database.** Web3Signer only supports PostgreSQL. Create a database, then load the schema files shipped in the release's `migrations/postgresql/` directory, in order. Web3Signer's docs use [Flyway](https://documentation.red-gate.com/flyway):
+
+	```bash
+	flyway migrate \
+	  -url="jdbc:postgresql://localhost/web3signer" \
+	  -locations="filesystem:<WEB3SIGNER_DIR>/migrations/postgresql"
+	```
+
+	Replace `<WEB3SIGNER_DIR>` with the unpacked release directory. Run the migrations again after every Web3Signer upgrade.
+
+3. **Describe each key in a key configuration file.** Create one YAML file per keystore in a dedicated directory, for example `/var/lib/web3signer/keys/`:
+
+	```yaml title="/var/lib/web3signer/keys/validator-0.yaml"
+	type: "file-keystore"
+	keyType: "BLS"
+	keystoreFile: "/var/lib/web3signer/keystores/keystore-m_12381_3600_0_0_0-<TIMESTAMP>.json"
+	keystorePasswordFile: "/var/lib/web3signer/keystores/keystore-m_12381_3600_0_0_0-<TIMESTAMP>.txt"
+	```
+
+	The password file holds the keystore password in plain text. Make it readable only by the user that runs Web3Signer.
+
+4. **Start Web3Signer** in `eth2` mode for your network, with its slashing protection database:
+
+	```bash
+	bin/web3signer \
+	  --key-store-path=/var/lib/web3signer/keys \
+	  --http-listen-host=127.0.0.1 \
+	  --http-listen-port=9000 \
+	  eth2 \
+	  --network=hoodi \
+	  --slashing-protection-db-url="jdbc:postgresql://localhost/web3signer" \
+	  --slashing-protection-db-username=<DB_USER> \
+	  --slashing-protection-db-password=<DB_PASSWORD> \
+	  --slashing-protection-pruning-enabled=true
+	```
+
+	Options before `eth2` are global; options after it apply to consensus-layer signing. Use `--network=mainnet` on mainnet: the network must match Prysm's. `9000` and `localhost` are the defaults. If the validator client runs on another host, set `--http-listen-host` to a private address and add that host name to `--http-host-allowlist`.
+
+5. **Check Web3Signer is up and has loaded your keys.**
+
+	```bash
+	curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:9000/upcheck
+	curl -s http://127.0.0.1:9000/api/v1/eth2/publicKeys
+	```
+
+	The first returns `200`; the second lists the public keys Web3Signer can sign for.
+
+</Steps>
+
+<Aside type="danger" title="Move slashing protection history with the keys">
+If these keys ever signed anywhere else, import that client's [slashing protection history](/validators/slashing-protection/) into Web3Signer before it signs anything, and make sure the old client can never run the keys again. Web3Signer imports the EIP-3076 interchange format with its `eth2 import` subcommand:
+
+```bash
+bin/web3signer eth2 \
+  --slashing-protection-db-url="jdbc:postgresql://localhost/web3signer" \
+  --slashing-protection-db-username=<DB_USER> \
+  --slashing-protection-db-password=<DB_PASSWORD> \
+  import --from=<PATH_TO_INTERCHANGE_JSON>
+```
+
+Import the same file into the Prysm validator client's database too, with `validator slashing-protection-history import`.
+</Aside>
+
+## Connect the Prysm validator client
+
+Point the validator client at Web3Signer and tell it which keys to validate with.
+
+| Flag | What it does |
+| --- | --- |
+| <Flag name="validators-external-signer-url" bin="validator" /> | Web3Signer's base URL, for example `http://127.0.0.1:9000`. Required. |
+| <Flag name="validators-external-signer-public-keys" bin="validator" /> | The keys to validate with: a comma-separated list of public keys, or a single URL that returns them (usually Web3Signer's `/api/v1/eth2/publicKeys`). |
+| <Flag name="validators-external-signer-key-file" bin="validator" /> | A file of public keys, one per line. Prysm watches it for changes, and Keymanager API imports and deletions write to it. The file must already exist. |
+| <Flag name="validators-external-signer-poll-interval" bin="validator" /> | How often to re-fetch the public keys URL, for example `5m`. Off by default, so a URL is read once at startup. |
+
+You need at least one key source: the public keys flag, the key file, or both. Prysm validates with the union of all sources.
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --validators-external-signer-url=http://127.0.0.1:9000 \
+  --validators-external-signer-public-keys=<PUBKEY_1>,<PUBKEY_2> \
+  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+```
+
+Replace the placeholders with your `0x`-prefixed validator public keys and fee recipient. The long flag names have short aliases, such as `--remote-signer-url` and `--remote-signer-keys`; see [Remote signer flags](/flags/remote-signer/).
+
+<Aside type="caution" title="Prefer an explicit key list over the public keys URL">
+With the URL form, the validator client validates with **every** key Web3Signer holds. If several validator clients share one Web3Signer, each one would then run every key. Web3Signer's slashing protection should refuse the second signature, but you'd be relying on one layer instead of two, and duties would still collide. List each validator client's keys explicitly, or give each its own key file.
+</Aside>
+
+At startup the validator client logs `No Prysm wallet required for web3signer validation`. Wallet password flags are ignored in this mode.
+
+## Manage remote keys at runtime
+
+The Keymanager API has `remotekeys` endpoints to list, add and remove Web3Signer-backed keys without a restart. They need:
+
+- The validator client's HTTP API enabled with <Flag name="rpc" bin="validator" />, on <Flag name="http-port" bin="validator" /> (default `7500`).
+- <Flag name="validators-external-signer-key-file" bin="validator" /> set to an existing file (an empty file is fine), because imported keys are stored there. Keys from the public keys flag or URL can't be deleted through the API; they'd come back on the next reload.
+- The API token, which the validator client writes to <Flag name="keymanager-token-file" bin="validator" /> and prints at startup.
+
+```bash
+touch /var/lib/ethereum/validator/remote-keys.txt
+
+./prysm.sh validator \
+  --hoodi \
+  --rpc \
+  --validators-external-signer-url=http://127.0.0.1:9000 \
+  --validators-external-signer-key-file=/var/lib/ethereum/validator/remote-keys.txt \
+  --keymanager-token-file=/var/lib/ethereum/validator/auth-token \
+  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+```
+
+Then add a key:
+
+```bash
+curl -X POST http://127.0.0.1:7500/eth/v1/remotekeys \
+  -H "Authorization: Bearer $(cat /var/lib/ethereum/validator/auth-token)" \
+  -H "Content-Type: application/json" \
+  -d '{"remote_keys":[{"pubkey":"<PUBKEY>"}]}'
+```
+
+`GET /eth/v1/remotekeys` lists the keys and `DELETE /eth/v1/remotekeys` removes them. Prysm ignores a `url` field in the request: every key uses <Flag name="validators-external-signer-url" bin="validator" />. See [Manage keys at runtime](/validators/keymanager/) for the full API.
+
+Web3Signer has its own Keymanager API, enabled with `--key-manager-api-enabled=true` under `eth2`, for importing keystores into Web3Signer itself. That's a separate API on Web3Signer's port.
+
+## Check that it works
+
+1. The validator client starts without key errors and reports the number of validating keys you expect.
+2. After a few epochs, the validator client logs `Submitted new attestations` for your keys. Signing failures appear as errors from the `remote-web3signer` package.
+3. Web3Signer's `upcheck` keeps returning `200`, and its logs show signing requests.
+
+## Troubleshooting
+
+**`no web3signer public keys or key file path provided`.**
+Set <Flag name="validators-external-signer-public-keys" bin="validator" />, <Flag name="validators-external-signer-key-file" bin="validator" />, or both.
+
+**`no file exists in remote signer key file path`.**
+Prysm doesn't create the key file. Create it (it may be empty) and make its directory writable by the validator client, or imports through the Keymanager API fail.
+
+**Every signing request fails.**
+Check that Web3Signer runs on the same network as Prysm (`--network` under `eth2`), that its host allowlist includes the name the validator client uses to reach it, and that it has the key. A request for a key Web3Signer doesn't hold fails.
+
+**Web3Signer refuses to sign after a migration.**
+That's its slashing protection working: its database says the key already signed a conflicting message. Confirm the old client is stopped for good and that you imported the right interchange file. Don't delete or bypass the database to get past this.
+
+**You run more than one Web3Signer instance.**
+Point every instance at the same PostgreSQL database. Web3Signer's slashing protection only coordinates instances that share a database; separate databases can each approve a conflicting signature. Web3Signer also doesn't do doppelganger detection; use Prysm's <Flag name="enable-doppelganger" bin="validator" /> if you want it.
+
+**Web3Signer is on another host.**
+Plain HTTP carries every signing request in clear text. Prysm connects with Go's standard HTTP client: use an `https://` URL with a certificate the validator host trusts (Web3Signer's `--tls-keystore-file`). Prysm doesn't present client certificates, so restrict access with a firewall or private network rather than TLS client authentication.
+
+## Next steps
+
+- [Remote signer flags](/flags/remote-signer/)
+- [Slashing protection history](/validators/slashing-protection/)
+- [Protect your keys](/security/keys/)
+- [Web3Signer documentation](https://docs.web3signer.consensys.io/)
