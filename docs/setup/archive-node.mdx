@@ -1,0 +1,191 @@
+---
+title: "Run an archive node"
+description: Set up a Prysm beacon node that keeps every block and answers questions about any past slot quickly, for explorers, indexers and research.
+---
+
+import { Steps } from '@site/src/components/ui';
+import { SetupPicker, When } from '@site/src/components/SetupPicker';
+import Flag from '@site/src/components/Flag';
+
+<SetupPicker groups="os net" />
+
+An archive node answers questions about any past slot quickly, for explorers, indexers and research. You don't need one to stake. It needs far more disk than a staking node; see [Disk space](/setup/storage/) for what a regular node uses.
+
+## Before you begin
+
+- A connected execution client, with the folder layout from [Connect your execution client](/setup/connect-execution-client/).
+- A beacon node data directory that's **empty**. If it already holds a database, the node carries on from there instead of syncing from genesis.
+
+## Set it up
+
+<Steps>
+
+1. <When net="hoodi sepolia">
+
+	**Download the genesis state.** Prysm ships the mainnet genesis state, but not the testnet ones. Get `genesis.ssz` from the [eth-clients/\{net\}](https://github.com/eth-clients/{net}/tree/main/metadata) repository, next to the network's other data:
+
+	<When os="unix">
+
+	```bash
+	curl -L https://github.com/eth-clients/{net}/raw/main/metadata/genesis.ssz \
+	  --output $HOME/ethereum/data/{net}/genesis.ssz
+	```
+
+	</When>
+	<When os="win">
+
+	```powershell
+	curl.exe -L https://github.com/eth-clients/{net}/raw/main/metadata/genesis.ssz `
+	  --output $HOME\ethereum\data\{net}\genesis.ssz
+	```
+
+	</When>
+
+	<When net="hoodi">
+
+	The file is about 150 MB.
+
+	</When>
+	<When net="sepolia">
+
+	The file is about 3 MB.
+
+	</When>
+
+	</When>
+
+2. **Start the beacon node.** From the `consensus` folder, with an **empty** data directory:
+
+	<When net="mainnet" os="unix" conn="jwt">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --mainnet \
+	  --datadir=$HOME/ethereum/data/mainnet/beacon \
+	  --execution-endpoint=http://localhost:8551 \
+	  --jwt-secret=$HOME/ethereum/data/jwt.hex \
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="mainnet" os="win" conn="jwt">
+
+	```powershell
+	.\prysm.bat beacon-chain `
+	  --mainnet `
+	  --datadir=$HOME\ethereum\data\mainnet\beacon `
+	  --execution-endpoint=http://localhost:8551 `
+	  --jwt-secret=$HOME\ethereum\data\jwt.hex `
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="mainnet" os="unix" conn="ipc">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --mainnet \
+	  --datadir=$HOME/ethereum/data/mainnet/beacon \
+	  --execution-endpoint=$HOME/ethereum/data/mainnet/execution/geth.ipc \
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="mainnet" os="win" conn="ipc">
+
+	```powershell
+	.\prysm.bat beacon-chain `
+	  --mainnet `
+	  --datadir=$HOME\ethereum\data\mainnet\beacon `
+	  --execution-endpoint=\\.\pipe\geth.ipc `
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="hoodi sepolia" os="unix" conn="jwt">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --{net} \
+	  --datadir=$HOME/ethereum/data/{net}/beacon \
+	  --execution-endpoint=http://localhost:8551 \
+	  --jwt-secret=$HOME/ethereum/data/jwt.hex \
+	  --genesis-state=$HOME/ethereum/data/{net}/genesis.ssz \
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="hoodi sepolia" os="win" conn="jwt">
+
+	```powershell
+	.\prysm.bat beacon-chain `
+	  --{net} `
+	  --datadir=$HOME\ethereum\data\{net}\beacon `
+	  --execution-endpoint=http://localhost:8551 `
+	  --jwt-secret=$HOME\ethereum\data\jwt.hex `
+	  --genesis-state=$HOME\ethereum\data\{net}\genesis.ssz `
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="hoodi sepolia" os="unix" conn="ipc">
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --{net} \
+	  --datadir=$HOME/ethereum/data/{net}/beacon \
+	  --execution-endpoint=$HOME/ethereum/data/{net}/execution/geth.ipc \
+	  --genesis-state=$HOME/ethereum/data/{net}/genesis.ssz \
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+	<When net="hoodi sepolia" os="win" conn="ipc">
+
+	```powershell
+	.\prysm.bat beacon-chain `
+	  --{net} `
+	  --datadir=$HOME\ethereum\data\{net}\beacon `
+	  --execution-endpoint=\\.\pipe\geth.ipc `
+	  --genesis-state=$HOME\ethereum\data\{net}\genesis.ssz `
+	  --slots-per-archive-point=32
+	```
+
+	</When>
+
+	<Flag name="slots-per-archive-point" /> is what makes it an archive node. Prysm stores a full state every this many slots (default 2048) and rebuilds the others by replaying blocks. `32`, one state per epoch, makes historical queries much faster and uses far more disk. Set it before you sync: it only affects states stored from then on.
+
+3. **Watch the logs.** Once it has peers, the node logs its progress every few seconds:
+
+	```text
+	INFO initial-sync: Processing blocks batchSize=… blocksPerSecond=… estimatedTimeRemaining=… latestProcessedSlot/currentSlot=…/… peers=… startingFrom=0x…
+	```
+
+	`estimatedTimeRemaining` tells you roughly when it will catch up. When it has, Prysm logs:
+
+	```text
+	INFO initial-sync: Synced to head of chain
+	```
+
+</Steps>
+
+## Check that it works
+
+<When os="unix">
+
+```bash
+curl -s http://localhost:3500/eth/v1/node/syncing
+```
+
+</When>
+<When os="win">
+
+```powershell
+curl.exe -s http://localhost:3500/eth/v1/node/syncing
+```
+
+</When>
+
+While the node syncs, `head_slot` grows from 0 and `sync_distance` shrinks. When `is_syncing` is `false`, the node is following the chain, and the logs show a `Synced new block` line for every block.
+
+For the remaining storage flags, see the [beacon-chain reference](/reference/cli/beacon-chain/).
