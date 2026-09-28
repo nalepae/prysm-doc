@@ -1,0 +1,202 @@
+---
+title: Unit tests
+description: Run Prysm's Go unit tests with Bazel for one package or the whole repository, filter tests, use the race detector, deal with sizes, timeouts and flaky tests, and keep BUILD files in sync with Gazelle.
+---
+
+import { Aside } from '@site/src/components/ui';
+
+Run the unit tests for the code you changed, and keep the `BUILD.bazel` files that describe those tests up to date. Every pull request runs these tests in CI, so running them locally first saves a review round.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/) and check that `bazel build //cmd/beacon-chain` works.
+- Run every command from the root of the repository.
+
+## How tests are organized
+
+Each Go package has a `BUILD.bazel` file with a `go_library` target called `go_default_library` and, if the package has tests, a `go_test` target called `go_default_test`. So the tests for `beacon-chain/sync` are the target `//beacon-chain/sync:go_default_test`.
+
+Prysm's `go_test` rule (in `tools/go/def.bzl`) adds an `eth_network` attribute. Tests with `eth_network = "minimal"` are compiled with the minimal preset, which is how tests that depend on minimal-preset sizes run without a separate `--config`.
+
+## Run tests
+
+| What | Command |
+| --- | --- |
+| One package | `bazel test //beacon-chain/sync:go_default_test` |
+| A package and everything below it | `bazel test //beacon-chain/sync/...` |
+| Every package you touched | `bazel test //beacon-chain/sync/... //validator/client/...` |
+| Everything except spec tests | `bazel test //... --test_tag_filters=-spectest` |
+| Everything | `bazel test //...` |
+
+`//...` skips targets tagged `manual`, which includes the [end-to-end tests](/developers/e2e-tests/). It does include the [spec tests](/developers/spec-tests/), which download the consensus spec test vectors on the first run.
+
+The output ends with a line per test target:
+
+```text
+//beacon-chain/sync:go_default_test                                     PASSED in 42.1s
+
+Executed 1 out of 1 test: 1 test passes.
+```
+
+`(cached) PASSED` means nothing the test depends on changed since the last successful run, so Bazel didn't run it again.
+
+### Run a single test
+
+Pass a regular expression to `--test_filter`. Bazel hands it to Go's `-test.run`:
+
+```bash
+bazel test //beacon-chain/sync:go_default_test \
+  --test_filter='TestValidateDataColumn$' \
+  --test_output=streamed
+```
+
+`--test_output=streamed` prints the test's output as it runs instead of only on failure. To also see `t.Log` output from passing tests, add `--test_arg=-test.v`.
+
+For a longer session of debugging one test, `--config=debug` combines streamed output, one test at a time, no timeout and no cached results:
+
+```bash
+bazel test --config=debug //beacon-chain/sync:go_default_test --test_filter='TestValidateDataColumn$'
+```
+
+### Pass environment variables
+
+Tests run in a sandbox with a minimal environment. Pass variables explicitly with `--test_env`:
+
+```bash
+bazel test //some/package:go_default_test --test_env=MY_VAR=value
+```
+
+## Read test logs
+
+Bazel prints the full log of each failing test (the repository sets `--test_output=errors`). Logs of every run, passing or failing, stay under `bazel-testlogs/`:
+
+```text
+bazel-testlogs/beacon-chain/sync/go_default_test/test.log
+bazel-testlogs/beacon-chain/sync/go_default_test/test.xml
+```
+
+Sharded tests (`shard_count` in `BUILD.bazel`) have one directory per shard, such as `shard_1_of_4/test.log`. Files a test writes to `$TEST_UNDECLARED_OUTPUTS_DIR` are zipped into `test.outputs/outputs.zip` next to the log.
+
+## Race detector
+
+Run tests with Go's race detector by setting rules_go's race flag:
+
+```bash
+bazel test //beacon-chain/sync/... --@io_bazel_rules_go//go/config:race
+```
+
+This rebuilds the tests and their dependencies in race mode, so the first run is slow. Race builds use more memory and CPU, so tests close to their timeout may time out.
+
+## Sizes and timeouts
+
+A test's `size` in `BUILD.bazel` sets its default timeout:
+
+| `size` | Timeout |
+| --- | --- |
+| `small` | 1 minute |
+| `medium` (Bazel's default) | 5 minutes |
+| `large` | 15 minutes |
+| `enormous` | 60 minutes |
+
+The repository sets `--test_verbose_timeout_warnings`, so Bazel warns when a test finishes far below its timeout. Pick the smallest size that passes reliably. To raise the timeout for one run, use `--test_timeout=<seconds>`.
+
+Large test packages are split with `shard_count`: Bazel runs the shards in parallel and each shard runs a subset of the tests.
+
+## Flaky tests
+
+A test that fails only sometimes usually has a real bug: a race, a dependency on wall-clock time, or a fixed port. Fix it rather than hiding it.
+
+To reproduce a flake, run the test many times without the cache:
+
+```bash
+bazel test //beacon-chain/sync:go_default_test \
+  --test_filter='TestName' \
+  --runs_per_test=50 \
+  --nocache_test_results
+```
+
+To tolerate flakes while you work on something else, retry failures:
+
+```bash
+bazel test //beacon-chain/sync/... --flaky_test_attempts=3
+```
+
+A test that passes on a retry is reported as `FLAKY` rather than `PASSED`. CI runs with `--flaky_test_attempts=5`. A target marked `flaky = True` in `BUILD.bazel` is retried up to three times by default; the long [end-to-end tests](/developers/e2e-tests/) use it, but don't add it to unit tests.
+
+## Keep BUILD files in sync with Gazelle
+
+You rarely edit `BUILD.bazel` files by hand. [Gazelle](https://github.com/bazelbuild/bazel-gazelle) generates them from your Go imports.
+
+Run it after you add, rename or delete a Go file, or change a package's imports:
+
+```bash
+bazel run //:gazelle -- fix
+```
+
+After you add or update a dependency in `go.mod`, also regenerate `deps.bzl`, where Bazel's copy of the Go dependencies lives:
+
+```bash
+go get github.com/<OWNER>/<MODULE>@<VERSION>
+bazel run //:gazelle -- update-repos -from_file=go.mod -to_macro=deps.bzl%prysm_deps -prune=true
+```
+
+CI runs `hack/check_gazelle.sh`, which fails if either command would change a file. To check without writing, run `bazel run //:gazelle -- fix --mode=diff`.
+
+A few directives in `BUILD.bazel` files steer Gazelle:
+
+- `# gazelle:ignore` stops Gazelle from changing a file. The end-to-end `BUILD.bazel` uses it for hand-written targets.
+- `# gazelle:exclude <file>` hides a file from Gazelle.
+- The root `BUILD.bazel` sets `# gazelle:build_tags bazel` and maps `go_library` and `go_test` to Prysm's wrappers in `tools/go/def.bzl`.
+
+<Aside type="note">
+Pull requests that update dependencies or the Go version aren't accepted from outside contributors. Open an issue instead. See [Contribute a change](/developers/contributing/).
+</Aside>
+
+## Test helpers and mocks
+
+Use the repository's own helpers rather than adding new test libraries:
+
+| Package | Use it for |
+| --- | --- |
+| `testing/require` | Assertions that stop the test: `require.NoError(t, err)`, `require.Equal(t, want, got)`, `require.DeepEqual(t, want, got)`, `require.LogsContain(t, hook, "…")`. |
+| `testing/assert` | The same assertions, but the test keeps running after a failure. |
+| `testing/util` | Fixtures: `util.NewBeaconState()`, `util.NewBeaconBlock()`, `util.DeterministicGenesisState(t, n)`, `util.GenerateFullBlock(…)`. |
+| `testing/mock`, `testing/validator-mock` | Generated gomock mocks of the gRPC clients and servers and the validator client interfaces. |
+| `beacon-chain/blockchain/testing`, `beacon-chain/db/testing`, `beacon-chain/p2p/testing` | Fakes for the chain service, a temporary database, and a test P2P host. |
+
+To check log output, capture it with `logTest "github.com/sirupsen/logrus/hooks/test"` and `hook := logTest.NewGlobal()`, then assert with `require.LogsContain`.
+
+Mocks are generated with [`go.uber.org/mock`](https://github.com/uber-go/mock). If you change an interface that has a mock, regenerate it as described in [Generated code](/developers/code-generation/#mocks).
+
+## Static analysis runs with the build
+
+Every `bazel build` and `bazel test` also runs [nogo](https://github.com/bazel-contrib/rules_go/blob/master/go/nogo.rst), Bazel's Go static analysis. The analyzers are listed in the root `BUILD.bazel`: a selection from `golang.org/x/tools`, many `staticcheck` checks, and Prysm's own analyzers in `tools/analyzers/`. A finding fails compilation of the package, with the analyzer's name in the error. Per-analyzer file exclusions are in `nogo_config.json`.
+
+Prysm's own analyzers have unit tests that Bazel doesn't run. If you change one, run `go test ./tools/analyzers/...`.
+
+## Check that it works
+
+Run the tests for the packages you changed, with Gazelle in check mode:
+
+```bash
+bazel run //:gazelle -- fix --mode=diff
+bazel test //beacon-chain/sync/...
+```
+
+Gazelle prints nothing, and every test target reports `PASSED`.
+
+## Troubleshooting
+
+**`no such target '//my/package:go_default_test'`.** The package has new test files but no `go_test` target yet. Run `bazel run //:gazelle -- fix`.
+
+**`missing strict dependencies` or `undefined:` errors that `go build` doesn't show.** Bazel only lets a package use what its `BUILD.bazel` lists in `deps`. Run Gazelle to add the missing dependency.
+
+**A test passes alone but fails with `--runs_per_test` or in CI.** It likely depends on timing or shared state. Run it with the race detector, and look for fixed ports, global variables, and `time.Sleep`.
+
+**`TIMEOUT` in the results.** The test ran longer than its `size` allows. Find out why before raising the size. A deadlock also shows up as a timeout.
+
+## Next steps
+
+- [Spec tests](/developers/spec-tests/)
+- [End-to-end tests](/developers/e2e-tests/)
+- [Generated code](/developers/code-generation/)

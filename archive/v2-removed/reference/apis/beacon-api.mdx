@@ -1,0 +1,183 @@
+---
+title: Beacon API
+description: Query a Prysm beacon node over the standard Ethereum Beacon API, including JSON and SSZ responses, the event stream, the debug namespace and the gRPC deprecation timeline.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The Beacon API is the standard REST API that every Ethereum consensus client serves. Prysm's beacon node implements it, so tools written for any client (dashboards, explorers, validator clients, scripts) work against Prysm unchanged. This page covers how to reach it, the requests you'll use most, and where Prysm's behavior is worth knowing about.
+
+The authoritative list of endpoints, parameters and response schemas is the [Beacon API specification](https://ethereum.github.io/beacon-APIs/). This page doesn't repeat it.
+
+## Base URL
+
+The beacon node serves the API over plain HTTP on `127.0.0.1:3500`:
+
+```text
+http://127.0.0.1:3500
+```
+
+| Setting | Flag | Default |
+| --- | --- | --- |
+| Listen address | <Flag name="http-host" /> | `127.0.0.1` |
+| Port | <Flag name="http-port" /> | `3500` |
+| Allowed browser origins (CORS) | <Flag name="http-cors-domain" /> | `localhost`, `127.0.0.1` and `0.0.0.0` on ports 3000, 4200 and 7500 |
+| Request timeout | <Flag name="api-timeout" /> | none unless you set the flag |
+
+When the server starts, the beacon node logs:
+
+```text
+INFO httprest: Starting HTTP server address=127.0.0.1:3500
+```
+
+<Aside type="caution" title="Keep the API private">
+The Beacon API has no authentication. Some endpoints are expensive enough to slow the node down, and others reveal which validators you run. Leave <Flag name="http-host" /> on `127.0.0.1` and reach it through an SSH tunnel or a reverse proxy you control. See [Expose APIs safely](/security/apis/).
+</Aside>
+
+## Make your first request
+
+Ask the node whether it's synced:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+```json
+{"data":{"head_slot":"1234567","sync_distance":"0","is_syncing":false,"is_optimistic":false,"el_offline":false}}
+```
+
+`sync_distance` of `0` and `is_syncing: false` mean the node is at the head of the chain. `el_offline: true` means the beacon node can't reach its execution client.
+
+## Common endpoints
+
+Path parameters such as `{state_id}` and `{block_id}` accept `head`, `genesis`, `finalized`, `justified`, a slot number or a `0x`-prefixed root.
+
+| What you want | Request |
+| --- | --- |
+| Sync status | `GET /eth/v1/node/syncing` |
+| Health (for load balancers) | `GET /eth/v1/node/health` (200 synced, 206 syncing or optimistic, 503 otherwise) |
+| Client version | `GET /eth/v1/node/version` |
+| Connected peers | `GET /eth/v1/node/peers`, `GET /eth/v1/node/peer_count` |
+| Genesis time and fork | `GET /eth/v1/beacon/genesis` |
+| Chain configuration | `GET /eth/v1/config/spec`, `GET /eth/v1/config/fork_schedule` |
+| Finality | `GET /eth/v1/beacon/states/head/finality_checkpoints` |
+| A block | `GET /eth/v2/beacon/blocks/{block_id}` |
+| A block header | `GET /eth/v1/beacon/headers/{block_id}` |
+| One validator | `GET /eth/v1/beacon/states/head/validators/{validator_id}` |
+| Validator balances | `GET` or `POST /eth/v1/beacon/states/{state_id}/validator_balances` |
+| Proposer duties | `GET /eth/v2/validator/duties/proposer/{epoch}` |
+| Block rewards | `GET /eth/v1/beacon/rewards/blocks/{block_id}` |
+| Blobs of a block | `GET /eth/v1/beacon/blobs/{block_id}` |
+
+Look up a validator by index or by `0x`-prefixed public key:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/validators/<VALIDATOR_INDEX_OR_PUBKEY>
+```
+
+Replace `<VALIDATOR_INDEX_OR_PUBKEY>` with your validator's index (for example `12345`) or its public key.
+
+Check finality:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/beacon/states/head/finality_checkpoints
+```
+
+Many list endpoints accept repeated query parameters. Prysm also accepts comma-separated values, so `?id=1,2,3` and `?id=1&id=2&id=3` are equivalent.
+
+## Request SSZ instead of JSON
+
+Endpoints that return large objects (blocks, states, blobs, attestation data and more) can return SSZ-encoded bytes, which are smaller and faster to decode than JSON. Ask for them with the `Accept` header:
+
+```bash
+curl -s \
+  -H "Accept: application/octet-stream" \
+  -o head-block.ssz \
+  http://127.0.0.1:3500/eth/v2/beacon/blocks/head
+```
+
+The response carries an `Eth-Consensus-Version` header (for example `fulu`) that tells you which fork's type to decode the bytes with. If an endpoint doesn't support the media type you ask for, Prysm answers `406 Not Acceptable`.
+
+Prysm compresses JSON responses with gzip when the request includes `Accept-Encoding: gzip`. With `curl`, add `--compressed`.
+
+## Subscribe to events
+
+`GET /eth/v1/events` is a [server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) stream. Pass the topics you want in `topics`:
+
+```bash
+curl -N \
+  -H "Accept: text/event-stream" \
+  "http://127.0.0.1:3500/eth/v1/events?topics=head,finalized_checkpoint,chain_reorg"
+```
+
+`-N` turns off buffering so events print as they arrive. Each event is an `event:` line with the topic name followed by a `data:` line with a JSON payload.
+
+Prysm serves these topics: `head`, `block`, `block_gossip`, `attestation`, `single_attestation`, `voluntary_exit`, `finalized_checkpoint`, `chain_reorg`, `contribution_and_proof`, `bls_to_execution_change`, `payload_attributes`, `blob_sidecar`, `data_column_sidecar`, `proposer_slashing`, `attester_slashing`, `light_client_finality_update` and `light_client_optimistic_update`. The source also defines topics for upcoming forks; check `beacon-chain/rpc/eth/events/events.go` if you need them. An unknown topic returns `400 Bad Request`.
+
+## Debug namespace
+
+The `/eth/v1/debug/*` and `/eth/v2/debug/*` endpoints are **on by default**. They include:
+
+| Request | Returns |
+| --- | --- |
+| `GET /eth/v2/debug/beacon/states/{state_id}` | A full beacon state (use SSZ; the JSON is very large) |
+| `GET /eth/v2/debug/beacon/heads` | Current fork choice heads |
+| `GET /eth/v1/debug/fork_choice` | The fork choice store |
+| `GET /eth/v1/debug/beacon/data_column_sidecars/{block_id}` | PeerDAS data column sidecars for a block |
+
+Download the finalized state as SSZ, for example to seed another node:
+
+```bash
+curl -s \
+  -H "Accept: application/octet-stream" \
+  -o finalized-state.ssz \
+  http://127.0.0.1:3500/eth/v2/debug/beacon/states/finalized
+```
+
+Turn the whole namespace off with <Flag name="disable-debug-rpc-endpoints" />. Its endpoints then return `404`. The same flag also removes the gRPC `Debug` service.
+
+Requesting old states is slow because the node regenerates them by replaying blocks from the nearest saved state. See [Storage, pruning and archive nodes](/operate/storage/) if you need fast historical queries.
+
+## Light client endpoints
+
+The `/eth/v1/beacon/light_client/*` endpoints (bootstrap, updates, finality and optimistic updates) are only served when you start the beacon node with <Flag name="enable-light-client" />.
+
+## Removed endpoints
+
+When the specification retires an endpoint, Prysm keeps the old route and answers `410 Gone` with the replacement in the message, for example:
+
+```json
+{"message":"This endpoint was removed from the Beacon API specification and is no longer supported. Use /eth/v2/beacon/blocks/{block_id} instead.","code":410}
+```
+
+Retired routes include the v1 block, attestation-pool, attester-slashing, aggregate and block-production endpoints, `/eth/v1/beacon/deposit_snapshot` and `/eth/v1/builder/states/{state_id}/expected_withdrawals`. If a tool breaks with a `410`, update it to the route named in the message.
+
+## Prysm additions
+
+Prysm serves a few endpoints that aren't in the specification, under the `/prysm/v1/` prefix, and one under `/eth/v1/`: `GET /eth/v1/beacon/states/{state_id}/validator_count`. They're documented on [Prysm-specific APIs](/reference/apis/prysm-api/).
+
+## Validator client over REST and the gRPC deprecation
+
+The Prysm validator client talks to the beacon node over gRPC on port `4000` by default (<Flag name="beacon-rpc-provider" bin="validator" />). It can use the Beacon API instead: set <Flag name="beacon-rest-api-provider" bin="validator" value="http://127.0.0.1:3500" />, which turns REST mode on by itself. In REST mode the validator relies on standard endpoints, so it can also connect to other consensus clients. It calls the Prysm-only `/prysm/validators/performance` endpoint only after checking that the node reports itself as Prysm.
+
+Prysm's flag help states the gRPC timeline: "The gRPC API will remain the default and fully supported through v8 (expected in 2026) but will be eventually removed in favor of REST API." New integrations should use the Beacon API. See [Prysm-specific APIs](/reference/apis/prysm-api/#grpc-api) for the gRPC services that remain.
+
+## Troubleshooting
+
+**`curl: (7) Failed to connect to 127.0.0.1 port 3500`.** The beacon node isn't running, is still starting, or listens elsewhere. Look for the `Starting HTTP server` log line and check <Flag name="http-host" /> and <Flag name="http-port" />. From another machine, the default `127.0.0.1` isn't reachable; use an SSH tunnel.
+
+**`406 Not Acceptable`.** The endpoint doesn't serve the `Accept` type you asked for. Most endpoints are JSON-only; drop the header or use `Accept: application/json`.
+
+**`404` on `/eth/v1/debug/...` or `/eth/v2/debug/...`.** The node runs with <Flag name="disable-debug-rpc-endpoints" />.
+
+**Browser requests fail with a CORS error.** Add your page's origin to <Flag name="http-cors-domain" />. This only affects browsers; `curl` ignores CORS.
+
+**Historical state queries time out.** The node is replaying blocks to rebuild the state. Query closer to `head`, or run the node with a smaller archive interval as described in [Storage, pruning and archive nodes](/operate/storage/).
+
+## Next steps
+
+- [Prysm-specific APIs](/reference/apis/prysm-api/): endpoints only Prysm serves.
+- [Keymanager API](/reference/apis/keymanager-api/): manage keys on the validator client.
+- [API flags](/flags/apis/): every flag that changes how the APIs are served.
+- [Expose APIs safely](/security/apis/): tunnels, proxies and firewalls.

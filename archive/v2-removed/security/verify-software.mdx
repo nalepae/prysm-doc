@@ -1,0 +1,152 @@
+---
+title: Verify the software you run
+description: Check Prysm release binaries against their SHA-256 checksums and GPG signatures, pin Docker images by digest, build from source, and keep up with security releases.
+---
+
+import { Steps } from '@site/src/components/ui';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+Your node runs software with access to your validator keys. Verify that each Prysm binary is the one Prysm's maintainers released, and apply the same care to the execution client, MEV-Boost and any remote signer next to it.
+
+## What Prysm publishes
+
+Each [GitHub release](https://github.com/OffchainLabs/prysm/releases) contains, for every binary:
+
+- the binary, for example `beacon-chain-<VERSION>-linux-amd64`;
+- `<binary>.sha256`, its SHA-256 checksum;
+- `<binary>.sig`, a detached GPG signature.
+
+Releases are signed with this key:
+
+```text
+0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+```
+
+The same fingerprint appears in [`prysm.sh`](https://github.com/OffchainLabs/prysm/blob/develop/prysm.sh) and in the signed [security.txt](https://github.com/OffchainLabs/prysm/blob/develop/.well-known/security.txt). Check it against at least one of them yourself rather than trusting this page alone.
+
+## Verify a release binary
+
+<Steps>
+
+1. Download the binary, its `.sha256` and its `.sig` from the [releases page](https://github.com/OffchainLabs/prysm/releases). Replace `<VERSION>` with the release, for example <PrysmVersion />:
+
+   ```bash
+   VERSION=<VERSION>
+   for f in beacon-chain-$VERSION-linux-amd64 validator-$VERSION-linux-amd64; do
+     for ext in "" .sha256 .sig; do
+       curl -fLO "https://github.com/OffchainLabs/prysm/releases/download/$VERSION/$f$ext"
+     done
+   done
+   ```
+
+2. Check the checksums:
+
+   ```bash
+   sha256sum -c beacon-chain-$VERSION-linux-amd64.sha256 validator-$VERSION-linux-amd64.sha256
+   ```
+
+   On macOS use `shasum -a 256 -c`. Each file should report `OK`.
+
+3. Import the signing key and check its fingerprint:
+
+   ```bash
+   curl -fsSL https://prysmaticlabs.com/releases/pgp_keys.asc | gpg --import
+   gpg --fingerprint 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   ```
+
+   The printed fingerprint must match the one above exactly.
+
+4. Verify the signatures:
+
+   ```bash
+   gpg --verify beacon-chain-$VERSION-linux-amd64.sig beacon-chain-$VERSION-linux-amd64
+   gpg --verify validator-$VERSION-linux-amd64.sig validator-$VERSION-linux-amd64
+   ```
+
+   You should see:
+
+   ```text
+   gpg:                using RSA key 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   gpg: Good signature from "Preston Van Loon <preston@pvl.dev>" [unknown]
+   ```
+
+   The line `WARNING: This key is not certified with a trusted signature!` is expected unless you have signed the key yourself. What matters is `Good signature` **and** the key ID `0AE0051D647BA3C1A917AF4072E33E4DF1A5036E`. A good signature from any other key is not a valid Prysm release.
+
+</Steps>
+
+Then install the binaries as described in [Release binaries](/install/binaries/).
+
+## What `prysm.sh` verifies for you
+
+On Linux and macOS, `prysm.sh` downloads the binary with its `.sha256` and `.sig` from `prysmaticlabs.com`, checks the checksum, and checks the GPG signature. It imports the signing key from `prysmaticlabs.com` if a key with that fingerprint isn't already in your keyring. On success it prints:
+
+```text
+Verified beacon-chain-<VERSION>-linux-amd64 has been signed by Prysmatic Labs.
+```
+
+If `gpg` or a SHA-256 tool is missing, or verification fails, the script stops. Setting `PRYSM_ALLOW_UNVERIFIED_BINARIES=1` skips verification entirely; don't use it on a validator.
+
+Know the limits:
+
+- The binary, checksum, signature, and (on first run) the key all come from the same server. The check protects against corrupted downloads and tampering in transit, not against a compromise of that server. Importing and checking the key yourself first, as in step 3 above, closes most of that gap.
+- The script accepts a good signature and doesn't pin the fingerprint when verifying. Look for the `using RSA key 0AE0…036E` line in its output.
+- `prysm.bat` and `prysm.ps1` on Windows check only the SHA-256 checksum, not the GPG signature. Verify Windows binaries manually with [Gpg4win](https://www.gpg4win.org/) if you need the stronger check.
+- The script downloads the latest release unless you set `USE_PRYSM_VERSION`. For services, pin a version so an update happens when you choose.
+
+## Docker images
+
+Prysm publishes images at `gcr.io/offchainlabs/prysm/beacon-chain` and `gcr.io/offchainlabs/prysm/validator`, tagged by version (for example <PrysmVersion />), plus moving tags such as `stable` and `latest`. The images aren't signed (no cosign or Docker Content Trust signatures are published), so the protections available are:
+
+- **Use version tags, never `latest` or `stable`,** so updates happen when you decide.
+- **Pin by digest** once you've chosen a version. A digest names exact image content, and can't be moved like a tag:
+
+  ```bash
+  docker pull gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>
+  docker inspect --format '{{index .RepoDigests 0}}' gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>
+  ```
+
+  ```yaml title="docker-compose.yml"
+  services:
+    beacon:
+      image: gcr.io/offchainlabs/prysm/beacon-chain:<VERSION>@sha256:<DIGEST>
+  ```
+
+  Record the digest when you first pull, and compare it on other machines. See [Docker](/install/docker/).
+- For the strongest assurance, build the image yourself from source (see [Build Docker images](/developers/docker-images/)), or run verified binaries in your own image.
+
+## Build from source
+
+Building from source removes trust in the release binaries, and moves it to the source code and your build environment. Check out a release tag and build with Bazel:
+
+```bash
+git clone https://github.com/OffchainLabs/prysm.git
+cd prysm
+git checkout <VERSION>
+bazel build //cmd/beacon-chain:beacon-chain //cmd/validator:validator --config=release
+```
+
+Bazel pins the Go toolchain and every dependency by checksum, so the build uses the same inputs as an official one. Your binary won't be byte-identical to the release, though: release builds are stamped with the build date and commit, so you can't verify a release by comparing hashes with your own build. See [Build with Bazel](/developers/build/).
+
+## Keep up with security releases
+
+- **Watch the repository's releases.** On [GitHub](https://github.com/OffchainLabs/prysm), choose **Watch → Custom → Releases** to get an email for each release. Release notes typically call out security fixes and upgrades required for a hard fork.
+- **Follow announcements** in the [Prysm Discord](https://discord.gg/qEZK94mFXP).
+- **Upgrade promptly** for security releases and before every scheduled network upgrade. A node that misses a hard fork stops following the chain. See [Update and roll back](/install/update/).
+- **Run the latest release.** The [security policy](https://github.com/OffchainLabs/prysm/blob/develop/SECURITY.md) recommends it, and fixes land there.
+
+## The rest of your stack
+
+Prysm is one of several programs with access to your node:
+
+- **Execution client:** verify releases according to its project's instructions, and upgrade it for hard forks at the same time as Prysm. See [Connect an execution client](/setup/connect-execution-client/).
+- **MEV-Boost:** download from the [official repository](https://github.com/flashbots/mev-boost/releases), and keep it current; old versions may not support new forks. See [Use MEV-Boost](/validators/mev-boost/).
+- **Web3Signer or another remote signer:** it holds your keys, so give it at least as much scrutiny as Prysm.
+- **Key generation tools:** verify the deposit tool's release checksums before you generate keys on your offline machine.
+
+Check release notes for version requirements across the stack: a hard fork usually needs new versions of all of them.
+
+## Next steps
+
+- [Install from release binaries](/install/binaries/)
+- [Update and roll back](/install/update/)
+- [Trust assumptions](/security/trust-assumptions/)

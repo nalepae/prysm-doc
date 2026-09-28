@@ -1,0 +1,183 @@
+---
+title: Read the logs
+description: How Prysm log lines are structured, how to change format, verbosity and destination, and what the important beacon node and validator messages mean.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Prysm's logs are the fastest way to see what your node is doing. This page explains how a log line is built, how to control where logs go and how detailed they are, and which messages matter for the beacon node and the validator client.
+
+## Anatomy of a log line
+
+With the default text format, every line looks like this:
+
+```text
+[2026-09-28 10:00:12.08]  INFO blockchain: Synced new block block=0x5b7dd003... epoch=385801 finalizedEpoch=385799 finalizedRoot=0xcdeff59f... sinceSlotStartTime=1.9s slot=12345650
+```
+
+| Part | Example | Meaning |
+| --- | --- | --- |
+| Timestamp | `[2026-09-28 10:00:12.08]` | Local time, to the hundredth of a second. |
+| Level | `INFO` | `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`, `FATAL`. |
+| Prefix | `blockchain:` | The Prysm package that logged it. Usually the last part of the package path (`beacon-chain/blockchain` → `blockchain`); a few are renamed, for example `validator/client` logs as `client`. |
+| Message | `Synced new block` | A fixed string. Search for it, in the logs or in the Prysm source. |
+| Fields | `slot=12345650` | Key–value details, sorted alphabetically. |
+
+## Control the output
+
+These flags exist on both `beacon-chain` and `validator`.
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| <Flag name="verbosity" /> | `info` | Minimum level printed: `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `panic`. |
+| <Flag name="log.vmodule" /> | none | Per-package levels, as `packagePath=level` pairs separated by commas. |
+| <Flag name="log-format" /> | `text` | `text`, `json`, `fluentd` or `journald`. |
+| <Flag name="log-file" /> | none | Also write logs to this file. Text logs are written without colors. |
+| <Flag name="disable-log-colors" /> | `false` | Plain terminal output, useful when piping to another tool. |
+| <Flag name="disable-ephemeral-log-file" /> | `false` | Turn off the 24-hour debug log file (see below). |
+
+### Turn up detail for one package
+
+Running the whole node at `debug` is noisy. Use <Flag name="log.vmodule" /> to raise the level of the packages you care about and keep everything else at `info`. Package paths are relative to the repository root, without a leading or trailing slash, and a setting applies to sub-packages too:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --log.vmodule=beacon-chain/p2p=debug,beacon-chain/sync=debug
+```
+
+Find a package path from its prefix: the `sync` prefix is `beacon-chain/sync`, `initial-sync` is `beacon-chain/sync/initial-sync`, and so on. When `beacon-chain/blockchain` is at `debug`, `Synced new block` lines also show the extra fields that are normally only in the debug log file (justified checkpoint, parent root, processing times).
+
+### Structured logs
+
+Use `--log-format=json` if you ship logs to Loki, Elasticsearch or similar. Each line is one JSON object with `level`, `msg`, `time`, `package` and the fields. Use `--log-format=journald` to write straight to the systemd journal instead of stderr.
+
+When Prysm runs under systemd with the default text format, the journal already captures stderr, so this is enough:
+
+```bash
+journalctl -fu beacon     # follow the beacon node
+journalctl -u validator --since "1 hour ago"
+```
+
+(Unit names follow [Run with systemd](/setup/systemd/).)
+
+### The 24-hour debug log file
+
+Unless you pass <Flag name="disable-ephemeral-log-file" />, each process also writes a **debug-level** log to `<datadir>/logs/beacon-chain.log` or `<datadir>/logs/validator.log`, regardless of <Flag name="verbosity" />. The file rotates at 250 MB and keeps about a day of history.
+
+This is the file to attach when you [report a bug](/operate/troubleshooting/#report-a-bug): it has the detail maintainers need even though your terminal only shows `info`.
+
+## Beacon node messages
+
+### Startup
+
+| Message | Prefix | Meaning |
+| --- | --- | --- |
+| `Prysm Beacon Chain started` | `main` | Version (`version=`) of the running binary. First line to check after an update. |
+| `Checking DB` | `node` | Path of the database being opened (`databasePath=`). |
+| `Checkpoint sync - Downloading origin state and block` | `checkpoint-sync` | Checkpoint sync is fetching its starting point. |
+| `Origin checkpoint found in the database, ignoring checkpoint sync flags` | `checkpoint-sync` | Normal on restart: the database already has an origin, so checkpoint sync flags are ignored. |
+| `Connected to new endpoint` | `execution` | The execution client connection came back after a failure. A successful first connection logs nothing; errors are logged. |
+| `Started discovery v5` | `p2p` | Peer discovery is running. |
+
+### Syncing
+
+| Message | Meaning |
+| --- | --- |
+| `Waiting for enough suitable peers before syncing` | The node needs `required` peers (<Flag name="min-sync-peers" />, default 3) ahead of it and has `suitable`. Normal for a minute or two after start; if it persists, see [Can't find peers](/operate/troubleshooting/#cant-find-peers). |
+| `Processing blocks` | Initial sync progress: `latestProcessedSlot/currentSlot`, `blocksPerSecond`, `estimatedTimeRemaining`, `peers`. |
+| `Synced to finalized epoch - now syncing blocks up to current head` | First sync phase done. |
+| `Synced to head of chain` | Initial sync done. |
+| `Synced up to` | Initial sync finished; the node is now following the chain at `slot`. |
+
+### Normal operation
+
+| Message | Prefix | How often | What to check |
+| --- | --- | --- | --- |
+| `Synced new block` | `blockchain` | Every block | `slot` increases; `finalizedEpoch` is 2–3 behind `epoch`; `sinceSlotStartTime` is usually under 4s. |
+| `Finished applying state transition` | `blockchain` | Every block | Block contents: `attestations`, `payloadHash`, `txCount`, `kzgCommitmentCount`. |
+| `Connected peers` | `p2p` | Every minute | `total` near `target`; `inboundTCP` above zero. |
+| `Chain reorg occurred` | `blockchain` | Occasionally | A few a day is normal on any network. |
+
+### Warnings and errors that matter
+
+Many `WARN` lines are transient: a peer sent something invalid, a block arrived late. Worry when the same message repeats for minutes, or when head stops advancing.
+
+| Message | Level | What it means | What to do |
+| --- | --- | --- | --- |
+| `Could not connect to execution endpoint` / `Could not connect to execution client endpoint` | `ERROR` | The execution client is unreachable or rejected the connection. | Check the execution client is running, the URL in <Flag name="execution-endpoint" />, and the JWT secret. |
+| `HTTP authentication to your execution client is not working...` | `ERROR` | The execution client answered `401 Unauthorized`: the JWT secrets differ. | Point both clients at the same `jwt.hex`. |
+| `Called new payload with optimistic block` / `Called fork choice updated with optimistic block` | `INFO` | The execution client hasn't validated this block yet (it's syncing). | Expected during execution sync. If it continues after the execution client is synced, check the execution client. |
+| `Execution client is not syncing` | `WARN` | The execution client's latest block is more than five minutes old. | Check the execution client's logs and peers. |
+| `Failed to find peers` / `Failed to broadcast attestation` | `ERROR` | No peers on a subnet you need to publish to. | See [Can't find peers](/operate/troubleshooting/#cant-find-peers). |
+| `cannot obtain database lock, database may be in use by another process` | fatal at startup | Another process has the database open. | Make sure only one beacon node uses this <Flag name="datadir" />. |
+| `Postponing shutdown: a connected validator client has an upcoming block proposal...` | `WARN` | You set <Flag name="postpone-shutdown-for-proposals" /> and a proposal is due. | Wait, or send the signal again to stop immediately. |
+
+## Validator client messages
+
+All of these use the `client` prefix.
+
+### Startup and activation
+
+| Message | Meaning |
+| --- | --- |
+| `Prysm Validator started` | Version of the running binary (prefix `main`). |
+| `Validator service health check failed, waiting for healthy beacon node...` | The beacon node isn't reachable or healthy. Check <Flag name="beacon-rpc-provider" bin="validator" /> and that the beacon node is running. |
+| `Beacon chain started` | Connected to the beacon node and aligned on genesis. |
+| `Waiting for beacon node to sync to latest chain head` | Connected, but the beacon node is still syncing. The validator waits; nothing to do. |
+| `Waiting for deposit to be observed by beacon node` | Status `UNKNOWN`: the beacon node hasn't seen a deposit for this key. |
+| `Validator deposited, entering activation queue after finalization` | Status `DEPOSITED`. |
+| `Waiting for activation... Check validator queue status in a block explorer` | Status `PENDING`: in the activation queue. |
+| `Validator activated` | Status `ACTIVE` (or `EXITING`). Duties start. |
+| `Validator exited` | Status `EXITED`. |
+| `No active keys found. Waiting for activation...` | None of the loaded keys is active yet. |
+
+### Duties
+
+| Message | When | Meaning |
+| --- | --- | --- |
+| `Duties schedule` | Each epoch, per slot with duties | Upcoming duties: `slot`, `attesterPubkeys`, `proposerPubkey`, `timeUntilDuty`. |
+| `Submitted new attestations` | Each attestation | Published attestation, with `slot`, `pubkeys`, `sourceEpoch`, `targetEpoch`, `sinceSlotStartTime`. |
+| `Submitted new aggregate attestations` | When chosen as aggregator | |
+| `Submitted new block` | When proposing | `slot`, `blockRoot`, `graffiti`, `fork`. |
+| `Submitted sync committee messages` | Every slot while in a sync committee | |
+
+### Performance summaries
+
+Each epoch, for the previous epoch, the validator client logs one line per key and one aggregate line:
+
+```text
+[2026-09-28 10:06:48.00]  INFO client: Previous epoch voting summary balanceEth=32.012345678 correctlyVotedHead=true correctlyVotedSource=true correctlyVotedTarget=true diffGwei=13512 epoch=385801 pubkey=0xa1b2c3d4e5f6 slot=12345651
+[2026-09-28 10:06:48.00]  INFO client: Previous epoch aggregated voting summary attestationInclusionPct=100% averageInactivityScore=0 correctlyVotedHeadPct=100% correctlyVotedSourcePct=100% correctlyVotedTargetPct=100% epoch=385801
+[2026-09-28 10:06:48.00]  INFO client: Vote summary since launch attestationsInclusionPct=100% correctlyVotedHeadPct=98% correctlyVotedSourcePct=100% correctlyVotedTargetPct=100% numberOfEpochs=202 pctChangeCombinedBalance=0.00620%
+```
+
+- `correctlyVotedTarget=false` or a low `correctlyVotedTargetPct` costs rewards; look at the beacon node's sync and peers, and at your clock.
+- `correctlyVotedHead=false` now and then is normal: it happens when the block you voted for arrived late or was reorged.
+- `diffGwei` below zero for several epochs in a row means you are being penalized. See [Missed attestations](/operate/troubleshooting/#missed-attestations).
+- `inactivityScore` appears only when it is not zero; a growing score means the validator has been missing target votes during a period of non-finality.
+
+Pass <Flag name="disable-rewards-penalties-logging" bin="validator" /> to turn these lines off, for example with thousands of keys.
+
+### Validator warnings and errors
+
+| Message | What to do |
+| --- | --- |
+| `Could not determine if beacon chain started` | The validator can't reach the beacon node. Check the beacon node address and that it is running. |
+| `Could not request attestation to sign at slot` with `the node is currently optimistic and cannot serve validators` | The execution client is syncing. Wait for it; see [check health](/operate/check-health/). |
+| `Syncing to latest head, not ready to respond` | The beacon node is syncing. |
+| `Failed to propose block` | A proposal failed. Look at the error field and at the beacon node logs for the same slot. See [Missed proposals](/operate/troubleshooting/#missed-proposals). |
+| `Doppelganger found` | Another instance is signing with this key. **Stop and investigate**; see [Avoid slashing](/security/avoid-slashing/). |
+| `Fee recipient is burn address` | Your fee recipient is `0x0000…0000`; you'd lose execution rewards. See [Fee recipient](/validators/fee-recipient/). |
+
+<Aside type="tip">
+Every message on this page comes from the Prysm source. If you see a message not listed here, search for its text in the [Prysm repository](https://github.com/OffchainLabs/prysm) to find the code that logs it.
+</Aside>
+
+## Next steps
+
+- [Check node and validator health](/operate/check-health/)
+- [Metrics and dashboards](/operate/metrics/)
+- [Troubleshooting](/operate/troubleshooting/)
+- [Logging, metrics and debugging flags](/flags/logging-and-metrics/)

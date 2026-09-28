@@ -1,0 +1,132 @@
+---
+title: Beacon node only
+description: Run a Prysm beacon node without validators as a data source or Beacon API backend, and expose the API safely through a reverse proxy.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+A beacon node doesn't need validators. Run one on its own to back a block explorer, an indexer, a dashboard, a staking service's API layer, or validator clients on other machines. You still need an execution client: without one, the beacon node can't verify blocks.
+
+<TopologyDiagram variant="beacon-only" />
+
+## Before you begin
+
+- An execution client for the same network, set up from one of the [execution client pages](/setup/connect-execution-client/#pick-your-execution-client).
+- A JWT secret shared with the execution client. See [Connect an execution client](/setup/connect-execution-client/).
+- Enough disk for the history you want to serve. A checkpoint-synced node keeps recent history only; archive queries need more. See [Storage, pruning and archive nodes](/operate/storage/).
+
+## Decide what the node must serve
+
+| You need | Set | Notes |
+| --- | --- | --- |
+| Current head, recent blocks, validator status | Nothing extra | A checkpoint-synced node answers these within minutes. |
+| Blocks back to genesis | <Flag name="checkpoint-sync-url" /> plus backfill, or a genesis sync | See [Checkpoint sync](/setup/checkpoint-sync/). |
+| Historical states at any slot | Archive settings | See [Storage, pruning and archive nodes](/operate/storage/). |
+| The blobs or blob sidecars endpoints | <Flag name="semi-supernode" /> or <Flag name="supernode" /> | Since PeerDAS, a regular node stores only some data columns and can't rebuild every blob. `--semi-supernode` custodies just enough to serve these endpoints. See [Blobs and PeerDAS](/learn/blobs-and-peerdas/). |
+| Validator clients on other hosts | <Flag name="http-host" /> or <Flag name="rpc-host" /> on a private interface | See [Serve remote validator clients](#serve-remote-validator-clients). |
+
+You don't need <Flag name="suggested-fee-recipient" /> on a node without validators: it only applies when a validator attached to this node proposes.
+
+## Set up the node
+
+<Steps>
+
+1. **Start the execution client** with the command from its [client page](/setup/connect-execution-client/#pick-your-execution-client).
+
+2. **Start the beacon node.** Leave the API on localhost; the next steps put a proxy in front of it.
+
+	```bash
+	./prysm.sh beacon-chain \
+	  --hoodi \
+	  --execution-endpoint=http://localhost:8551 \
+	  --jwt-secret=../jwt.hex \
+	  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+	  --http-host=127.0.0.1 \
+	  --http-port=3500
+	```
+
+	Swap `--hoodi` and the checkpoint URL for `--mainnet` and a mainnet provider. `127.0.0.1` and `3500` are the defaults for <Flag name="http-host" /> and <Flag name="http-port" />; they're spelled out here to make the point.
+
+3. **Put a reverse proxy in front of the Beacon API.** Prysm's HTTP server has no TLS and no authentication, and some endpoints change node state (for example `POST /prysm/v1/node/trusted_peers` adds peers). A proxy adds TLS, access control and rate limits, and lets you publish only the paths your apps use. An nginx example:
+
+	```nginx title="/etc/nginx/sites-available/beacon-api"
+	server {
+	    listen 443 ssl;
+	    server_name beacon.example.internal;
+
+	    ssl_certificate     /etc/ssl/certs/beacon.crt;
+	    ssl_certificate_key /etc/ssl/private/beacon.key;
+
+	    # Only these networks may connect.
+	    allow 10.0.0.0/8;
+	    deny  all;
+
+	    # Keep Prysm-specific and debug endpoints private.
+	    location /prysm/     { return 403; }
+	    location /eth/v1/debug/ { return 403; }
+	    location /eth/v2/debug/ { return 403; }
+
+	    location / {
+	        proxy_pass http://127.0.0.1:3500;
+	        proxy_read_timeout 60s;
+	    }
+	}
+	```
+
+	Replace the server name, certificate paths and allowed networks with your own. If you don't need the debug namespace at all, also start Prysm with <Flag name="disable-debug-rpc-endpoints" />.
+
+4. **Allow browser apps, if any.** Browsers only call an API from another origin if it sends CORS headers. List the origins of your web apps in <Flag name="http-cors-domain" />:
+
+	```bash
+	--http-cors-domain=https://dashboard.example.internal
+	```
+
+	CORS is enforced by browsers only. It isn't access control: `curl` and scripts ignore it.
+
+</Steps>
+
+<Aside type="caution">
+Don't set `--http-host=0.0.0.0` on a machine with a public IP unless a firewall limits who can reach port 3500. Anyone who can reach it can read the chain through your node, load it with expensive queries, and call state-changing endpoints. See [Expose APIs safely](/security/apis/).
+</Aside>
+
+## Serve remote validator clients
+
+Validator clients on other hosts connect over the Beacon API (port 3500) or gRPC (port 4000). Bind the port you need to the private interface only, and firewall it to the validator hosts:
+
+```bash
+--http-host=10.0.0.5       # Beacon API, for --beacon-rest-api-provider
+--rpc-host=10.0.0.5        # gRPC, for --beacon-rpc-provider
+```
+
+Replace `10.0.0.5` with the beacon node's private address. For gRPC across an untrusted network, add <Flag name="tls-cert" /> and <Flag name="tls-key" />. Several validator clients can share this node; see [Several validator clients, one beacon node](/setup/topologies/multiple-validator-clients/).
+
+## Check that it works
+
+Query the node through the proxy:
+
+```bash
+curl -s https://beacon.example.internal/eth/v1/node/syncing
+curl -s -o /dev/null -w "%{http_code}\n" https://beacon.example.internal/eth/v1/node/health
+```
+
+`/eth/v1/node/health` returns `200` when the node is synced, `206` while it's syncing or optimistic, and `503` otherwise, so you can use it as a load balancer health check. From a host outside the allowed networks, both commands should fail.
+
+## Troubleshooting
+
+**Blob requests return errors or empty results for older blocks.**
+The node doesn't custody enough data columns. Restart it with <Flag name="semi-supernode" />, and remember that blobs are pruned after <Flag name="blob-retention-epochs" /> (4096 epochs, about 18 days, by default).
+
+**Slow or timed-out responses for historical states.**
+The node rebuilds old states by replaying blocks. Tune archive settings as described in [Storage, pruning and archive nodes](/operate/storage/), or raise `proxy_read_timeout` for those routes.
+
+**Browser app gets a CORS error.**
+The app's exact origin (scheme, host and port) must appear in <Flag name="http-cors-domain" />. Setting the flag replaces the default list.
+
+## Next steps
+
+- [Expose APIs safely](/security/apis/)
+- [Beacon API reference](/reference/apis/beacon-api/)
+- [APIs flags](/flags/apis/)
+- [Check node and validator health](/operate/check-health/)

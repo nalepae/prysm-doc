@@ -1,0 +1,166 @@
+---
+title: Run Prysm with Docker
+description: Pull the official Prysm Docker images, choose a tag, and run the beacon node and validator as containers with the right volumes, ports and networking.
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import PrysmVersionCommand from '@site/src/components/PrysmVersionCommand';
+
+The Prysm team publishes official images for each program to Google Container Registry. This page covers pulling them and running the beacon node and validator as single containers with `docker run`. To run the execution client, beacon node and validator together from one file, see [Run with Docker Compose](/setup/docker-compose/).
+
+## Before you begin
+
+- [Docker Engine](https://docs.docker.com/engine/install/) on Linux, or Docker Desktop on macOS or Windows.
+- An execution client, either in a container on the same Docker network (as below) or on the host. See [Connect an execution client](/setup/connect-execution-client/).
+- A JWT secret at `/var/lib/ethereum/jwt.hex`, shared with the execution client.
+
+## Images and tags
+
+| Program | Image |
+| --- | --- |
+| Beacon node | `gcr.io/offchainlabs/prysm/beacon-chain` |
+| Validator | `gcr.io/offchainlabs/prysm/validator` |
+| prysmctl | `gcr.io/offchainlabs/prysm/cmd/prysmctl` |
+
+Every image is multi-architecture (`linux/amd64` and `linux/arm64`); Docker pulls the right one for your machine. The image's entrypoint is the program itself, so whatever you put after the image name is passed to it as flags.
+
+| Tag | Points to | Use it? |
+| --- | --- | --- |
+| `v7.2.0` (a release tag) | That release, forever | **Yes.** Pin a release tag and change it deliberately. |
+| `stable` | The latest release; moves when a new release ships | Acceptable, but you update whenever you re-pull, without reading release notes |
+| `latest` | The newest build from the development branch | **No.** Not a release; for testing only |
+
+For the strongest pinning, use the image digest: `gcr.io/offchainlabs/prysm/beacon-chain@sha256:<DIGEST>`. Get it after a pull with `docker image inspect --format '{{index .RepoDigests 0}}' gcr.io/offchainlabs/prysm/beacon-chain:v7.2.0`.
+
+Pull the current release:
+
+<PrysmVersionCommand template={`docker pull gcr.io/offchainlabs/prysm/beacon-chain:{version}\ndocker pull gcr.io/offchainlabs/prysm/validator:{version}`} />
+
+### What's in the image
+
+- The program at `/beacon-chain`, `/validator` or `/prysmctl`, on a minimal Debian 11 base with `bash` and `coreutils`. There's no `curl` or `wget` inside.
+- The image runs as **root** (UID 0) unless you pass `--user`. It also defines a `nonroot` user with UID and GID `1001`. The examples below run as your own user instead, so files on the host belong to you.
+- Nothing is stored in the image. Mount a volume for the data directory, or everything is lost when the container is removed.
+
+## Run the beacon node
+
+<Steps>
+
+1. Create a Docker network so the containers can reach each other by name, and the data directory:
+
+   ```bash
+   docker network create ethereum
+   sudo mkdir -p /var/lib/ethereum/beacon
+   sudo chown "$(id -u):$(id -g)" /var/lib/ethereum/beacon
+   ```
+
+   Start your execution client on the same network with `--network ethereum --name execution`, so the beacon node can reach its Engine API at `http://execution:8551`. The execution client must accept Engine API connections from other containers (listen on `0.0.0.0` and allow any virtual host); see your client's page under [Execution clients](/setup/connect-execution-client/).
+
+2. Start the beacon node:
+
+   <PrysmVersionCommand template={`docker run -d \\\n  --name beacon \\\n  --network ethereum \\\n  --restart unless-stopped \\\n  --stop-timeout 900 \\\n  --user "$(id -u):$(id -g)" \\\n  -v /var/lib/ethereum/beacon:/data \\\n  -v /var/lib/ethereum/jwt.hex:/jwt.hex:ro \\\n  -p 13000:13000/tcp \\\n  -p 13000:13000/udp \\\n  -p 12000:12000/udp \\\n  -p 127.0.0.1:3500:3500 \\\n  gcr.io/offchainlabs/prysm/beacon-chain:{version} \\\n  --hoodi \\\n  --datadir=/data \\\n  --jwt-secret=/jwt.hex \\\n  --execution-endpoint=http://execution:8551 \\\n  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \\\n  --http-host=0.0.0.0 \\\n  --rpc-host=0.0.0.0 \\\n  --monitoring-host=0.0.0.0 \\\n  --accept-terms-of-use`} />
+
+   Swap `--hoodi` and the checkpoint URL for `--mainnet` and a mainnet endpoint on mainnet (see [Checkpoint sync](/setup/checkpoint-sync/)).
+
+3. Follow the logs:
+
+   ```bash
+   docker logs -f beacon
+   ```
+
+</Steps>
+
+Here's why each option is there:
+
+| Option | Why |
+| --- | --- |
+| `--restart unless-stopped` | Restart after a crash or reboot, unless you stopped it yourself. |
+| `--stop-timeout 900` | Docker's default is 10 seconds before it kills the process. The beacon node needs longer to close its database cleanly, and much longer if you use <Flag name="postpone-shutdown-for-proposals" />. |
+| `--user` | Run as your own UID instead of root. The mounted directory and `jwt.hex` must be readable (and the data directory writable) by that user. |
+| `-v ...:/data`, <Flag name="datadir" value="/data" /> | Keep the database on the host. |
+| `-p 13000`, `-p 12000` | Publish the P2P ports so peers can reach you. Forward them on your router too. |
+| `-p 127.0.0.1:3500:3500` | Make the Beacon API reachable from the host only, never from the internet. |
+| <Flag name="http-host" value="0.0.0.0" />, <Flag name="rpc-host" value="0.0.0.0" />, <Flag name="monitoring-host" value="0.0.0.0" /> | Inside a container, `127.0.0.1` is the container itself. Listening on all interfaces lets the validator container and Prometheus reach the node over the Docker network. Only the ports you publish with `-p` are reachable from outside. |
+| <Flag name="accept-terms-of-use" /> | A detached container can't answer the terms-of-use prompt. |
+
+### Execution client on the host
+
+If the execution client runs on the host rather than in a container:
+
+- **Linux:** add `--network host` instead of `--network ethereum` and all the `-p` options, and use `--execution-endpoint=http://localhost:8551`. The container then shares the host's network, so keep the `*-host` flags at their `127.0.0.1` defaults.
+- **Docker Desktop (macOS, Windows):** keep the bridge network and use `--execution-endpoint=http://host.docker.internal:8551`. The execution client must listen on an address the Docker VM can reach.
+
+### Peers behind NAT
+
+A container sees its own private address, not your public IP. The beacon node's discovery service can often learn the public address from its peers, but if you have a static public IP, set it explicitly with <Flag name="p2p-host-ip" /> (or <Flag name="p2p-host-dns" />). See [Peers, ports and NAT](/setup/networking/).
+
+## Run the validator
+
+<Steps>
+
+1. Create the validator's data directory and a file holding the wallet password (readable only by you):
+
+   ```bash
+   sudo mkdir -p /var/lib/ethereum/validator
+   sudo chown "$(id -u):$(id -g)" /var/lib/ethereum/validator
+   chmod 700 /var/lib/ethereum/validator
+   read -rs -p "Wallet password: " PW && printf '%s' "$PW" > /var/lib/ethereum/validator/wallet-password.txt && unset PW
+   chmod 600 /var/lib/ethereum/validator/wallet-password.txt
+   ```
+
+2. Import your keystores. This runs interactively (`-it`) and asks for the keystore password. Replace `<PATH_TO_VALIDATOR_KEYS>` with the folder the deposit CLI created:
+
+   <PrysmVersionCommand template={`docker run -it --rm \\\n  --user "$(id -u):$(id -g)" \\\n  -v /var/lib/ethereum/validator:/data \\\n  -v <PATH_TO_VALIDATOR_KEYS>:/keys:ro \\\n  gcr.io/offchainlabs/prysm/validator:{version} \\\n  accounts import \\\n  --hoodi \\\n  --keys-dir=/keys \\\n  --wallet-dir=/data/wallet \\\n  --wallet-password-file=/data/wallet-password.txt \\\n  --accept-terms-of-use`} />
+
+   See [Import keys into Prysm](/validators/import-keys/) for the details.
+
+3. Start the validator, pointing it at the beacon container:
+
+   <PrysmVersionCommand template={`docker run -d \\\n  --name validator \\\n  --network ethereum \\\n  --restart unless-stopped \\\n  --stop-timeout 60 \\\n  --user "$(id -u):$(id -g)" \\\n  -v /var/lib/ethereum/validator:/data \\\n  gcr.io/offchainlabs/prysm/validator:{version} \\\n  --hoodi \\\n  --datadir=/data \\\n  --wallet-dir=/data/wallet \\\n  --wallet-password-file=/data/wallet-password.txt \\\n  --beacon-rpc-provider=beacon:4000 \\\n  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \\\n  --accept-terms-of-use`} />
+
+   Replace `<YOUR_WALLET_ADDRESS>` with an Ethereum address you control.
+
+</Steps>
+
+The validator doesn't publish any ports: it only makes outgoing connections to the beacon node. Keep it that way. Its [Keymanager API](/validators/keymanager/) should never be reachable from the internet.
+
+:::danger[One validator client per key]
+Never start a second validator container, on this machine or another, with the same keys. Two clients signing for the same key get it slashed. Before recreating a container, make sure the old one is stopped: `docker ps -a --filter name=validator`.
+:::
+
+## Run prysmctl
+
+`prysmctl` runs to completion, so use `--rm`. Mount a working directory for any files it reads or writes. For example, to [download a checkpoint](/setup/checkpoint-sync/#sync-from-files) from the beacon container:
+
+<PrysmVersionCommand template={`docker run --rm \\\n  --network ethereum \\\n  --user "$(id -u):$(id -g)" \\\n  -v "$PWD":/work -w /work \\\n  gcr.io/offchainlabs/prysm/cmd/prysmctl:{version} \\\n  checkpoint-sync download --beacon-node-host=http://beacon:3500`} />
+
+## Check that it works
+
+```bash
+docker ps --filter name=beacon --filter name=validator
+curl -s http://127.0.0.1:3500/eth/v1/node/version
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+Both containers should show `Up`. The version endpoint returns the running release, such as `"Prysm/v7.2.0-03f3712 (linux amd64)"`, and `syncing` reports `"is_syncing": false` once the node has caught up.
+
+## Troubleshooting
+
+**`could not scan text input, if you are trying to run in non-interactive environment...`**
+The container has no terminal to answer the terms-of-use prompt. Add <Flag name="accept-terms-of-use" />, or run once with `-it`.
+
+**`permission denied` on `/data` or `/jwt.hex`**
+The UID you passed with `--user` can't read or write the mounted path. Fix ownership on the host (`sudo chown -R "$(id -u):$(id -g)" /var/lib/ethereum/beacon`) and make `jwt.hex` readable by that user.
+
+**The beacon node can't reach the execution client**
+Check that both containers are on the same network (`docker network inspect ethereum`), that the execution client listens on `0.0.0.0:8551` rather than `127.0.0.1`, and that its virtual-host allowlist accepts the name `execution`.
+
+**Few or no inbound peers**
+Check that ports 13000/tcp, 13000/udp and 12000/udp are published (`docker port beacon`) and forwarded on your router, then set <Flag name="p2p-host-ip" /> to your public IP.
+
+## Next steps
+
+- [Run with Docker Compose](/setup/docker-compose/)
+- [Update and roll back](/install/update/)
+- [Check node and validator health](/operate/check-health/)

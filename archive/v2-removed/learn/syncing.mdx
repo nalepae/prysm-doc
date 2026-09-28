@@ -1,0 +1,73 @@
+---
+title: How syncing works
+description: Checkpoint sync versus genesis sync, backfill, weak subjectivity and optimistic sync, and what "synced" means for the beacon node and the execution client.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A new node has to catch up with the chain before it can validate. The beacon node and the execution client each sync their own data, but the beacon node leads: it tells the execution client which chain to follow. The fastest and recommended way to start is **checkpoint sync**, which gets the beacon node to the head in minutes instead of replaying the chain from 2020.
+
+## Checkpoint sync and genesis sync
+
+| | Checkpoint sync | Genesis sync |
+| --- | --- | --- |
+| **Starting point** | A recent finalized state and block, downloaded from a beacon node you trust | The genesis state, then every block since |
+| **How to enable** | <Flag name="checkpoint-sync-url" /> (or <Flag name="checkpoint-state" /> and <Flag name="checkpoint-block" /> from files) | The default when no checkpoint flag is set |
+| **Time to reach the head** | Minutes | Much longer: every block since genesis is downloaded and processed |
+| **History** | None before the checkpoint unless you enable backfill | Complete |
+| **Trust** | You trust the checkpoint source to give you the real finalized state | You trust only the genesis state and the peers' blocks |
+
+With checkpoint sync, Prysm fetches the finalized state and block over the Beacon API, logs `Downloaded checkpoint sync state and block.`, and starts syncing forward from there. On later restarts it finds the checkpoint in its database, logs `Origin checkpoint found in the database, ignoring checkpoint sync flags` and carries on from where it stopped, so you can leave the flag in place.
+
+To set it up and choose a provider, see [Checkpoint sync](/setup/checkpoint-sync/).
+
+## Weak subjectivity
+
+In proof of stake, validators who have exited can still sign old messages without penalty. A group that once held a majority of stake could, long after leaving, sign an alternative history from far in the past. A node syncing from genesis can't tell that history apart from the real one by looking at signatures alone.
+
+The protection is to start from a recent **weak subjectivity checkpoint**: a finalized block that you know, from a source you trust, is on the canonical chain. Checkpoint sync does exactly that. The **weak subjectivity period** is how long such a checkpoint stays safe to start from; it depends on the validator set size and the churn limit, and is measured in weeks or months on mainnet.
+
+You can pin the chain to a checkpoint you verified yourself with <Flag name="weak-subjectivity-checkpoint" /> (format `block_root:epoch`). Prysm then refuses to follow any chain that doesn't contain it, and logs `Weak subjectivity check has passed!!` when it confirms the checkpoint. Compare the checkpoint against more than one source, such as a block explorer and a second beacon node. See [Trust assumptions](/security/trust-assumptions/).
+
+## Backfill: getting history after a checkpoint sync
+
+A checkpoint-synced node has no blocks older than its checkpoint. It validates and serves the Beacon API for recent data perfectly well, but it can't answer requests for older blocks, and it can't help other nodes sync them.
+
+With <Flag name="enable-backfill" />, Prysm downloads the missing history in the background once the forward sync reaches the head. It logs `Starting backfill`, reports `Backfill in progress` periodically, and ends with `Backfill is complete`. By default it goes back as far as the protocol requires nodes to serve blocks (`MIN_EPOCHS_FOR_BLOCK_REQUESTS`, 33,024 epochs, about five months), including blob data within its [retention window](/learn/blobs-and-peerdas/#retention). <Flag name="backfill-oldest-slot" /> lets you stop earlier. Batch size and parallelism are tuned with <Flag name="backfill-batch-size" /> and <Flag name="backfill-worker-count" />.
+
+If you need the complete history (for example to serve historical states), sync from genesis instead, or see [Storage, pruning and archive nodes](/operate/storage/).
+
+## How the execution client syncs
+
+The execution client doesn't know which chain is canonical until the beacon node tells it. As soon as the beacon node has a head, it sends it to the EL with `engine_forkchoiceUpdated`. The EL then downloads execution blocks and state from its own P2P network, usually with a fast state sync mode (snap sync in Geth, for example), without replaying every transaction since genesis.
+
+An EL sync typically takes much longer than a checkpoint sync of the beacon node, because the execution state is large. Until it finishes, the EL answers `SYNCING` to the beacon node's requests.
+
+## Optimistic sync
+
+When the beacon node imports a block and the EL answers `SYNCING` or `ACCEPTED` instead of `VALID`, Prysm doesn't stop. It imports the block **optimistically**: it checks everything it can on the consensus side, follows the chain, and marks the block as not yet verified. When the EL catches up and confirms the payloads, those blocks become fully verified. If the EL later reports one as `INVALID`, Prysm removes it and its descendants from fork choice (it logs `Pruned invalid blocks`).
+
+Optimistic sync lets the beacon node and the EL sync in parallel. The catch is that an optimistic node can't be trusted to vouch for the head, so **Prysm refuses to serve validator duties while its head is optimistic**. Requests for attestation data and blocks fail with `the node is currently optimistic and cannot serve validators`. Your validators start working only once the EL is synced.
+
+## What "synced" means
+
+| | Synced when… | How to check |
+| --- | --- | --- |
+| **Beacon node** | Its head is at or near the current slot, it has enough peers, and the head isn't optimistic | `curl http://127.0.0.1:3500/eth/v1/node/syncing`: `is_syncing` and `is_optimistic` are `false`, `sync_distance` is small, `el_offline` is `false` |
+| **Execution client** | It has the state of the head block and answers `VALID` | The EL's own sync status, for example `eth_syncing` returns `false` |
+| **Validator client** | It doesn't sync. It waits for the beacon node | While the BN syncs it logs `Waiting for beacon node to sync to latest chain head` |
+
+During initial sync the beacon node logs `Processing blocks` with progress, then `Synced to finalized epoch - now syncing blocks up to current head` and `Synced to head of chain`. After that, one `Synced new block` line per slot means it's following the chain. For a full checklist, see [Check node and validator health](/operate/check-health/).
+
+<Aside type="caution" title="Don't start validating on a half-synced node">
+Starting the validator client early isn't dangerous, but it won't do anything useful until both clients are synced. If your validators already have duties, every epoch spent syncing is missed rewards, so sync a new node before you move keys to it. See [Move to a new machine](/operate/move-to-new-machine/).
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Checkpoint sync" description="Set up checkpoint sync and verify the checkpoint." href="/setup/checkpoint-sync/" />
+	<LinkCard title="Check node and validator health" description="Confirm both clients are synced and following the chain." href="/operate/check-health/" />
+	<LinkCard title="Sync and storage flags" description="Every flag that affects sync, backfill and pruning." href="/flags/sync-and-storage/" />
+</CardGrid>

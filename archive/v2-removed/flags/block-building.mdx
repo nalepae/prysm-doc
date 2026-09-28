@@ -1,0 +1,107 @@
+---
+title: Block building and MEV
+description: Beacon node flags for MEV-Boost and local block building - the builder endpoint, circuit breakers, bid thresholds, fee recipient fallback, graffiti and proposal reliability.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+When one of your validators proposes, the beacon node either builds the block locally with your execution client or takes a block from external builders through MEV-Boost. These flags connect the beacon node to MEV-Boost and decide when it prefers the local block. For the concepts, see [MEV and block building](/learn/mev-and-block-building/); for a full setup, see [Use MEV-Boost](/validators/mev-boost/).
+
+## Connect to MEV-Boost
+
+Two things are needed. The beacon node needs <Flag name="http-mev-relay" />, pointing at MEV-Boost (not at a relay). The validator client must register your validators with the builder network, using <Flag name="enable-builder" bin="validator" /> or the builder section of the [proposer settings file](/flags/proposer-settings/). Proposals from validators that aren't registered always use the local block.
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --http-mev-relay=http://127.0.0.1:18550 \
+  ...
+```
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --enable-builder \
+  --suggested-fee-recipient=<YOUR_ADDRESS> \
+  ...
+```
+
+Replace `<YOUR_ADDRESS>` with the address that should receive fees. The gas limit you want builders to respect is also set on the validator client, with <Flag name="suggested-gas-limit" bin="validator" /> or in proposer settings; the beacon node has no gas limit flag.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="http-mev-relay" /> | none | MEV-Boost (Builder API) URL |
+| <Flag name="builder-header-timeout" /> | `1s` | How long to wait for a builder header before building locally |
+| <Flag name="disable-builder-ssz" /> | off | Use JSON instead of SSZ for Builder API calls |
+
+The node uses SSZ by default and logs `Using Builder APIs with SSZ enabled`. If the builder rejects SSZ (HTTP 415 or 406), it falls back to JSON automatically and logs `Remote builder rejected SSZ request; falling back to JSON encoding for subsequent requests`, so you rarely need `--disable-builder-ssz`.
+
+<Aside type="caution">
+Don't raise `--builder-header-timeout`. A slow builder then delays your block, which can get it orphaned. The default already matches the Builder API's one-second tolerance. Any override logs a warning at startup, and `0` or a negative value stops the node.
+</Aside>
+
+If fetching a bid fails, the node logs `Could not get builder payload` and proposes the local block, so a broken MEV-Boost costs MEV revenue but not the proposal.
+
+## Circuit breakers
+
+When the chain is missing blocks, relays or builders may be at fault. The circuit breakers make the node stop asking MEV-Boost and build locally until the chain recovers.
+
+| Flag | Default | Trips when |
+| --- | --- | --- |
+| <Flag name="max-builder-consecutive-missed-slots" /> | 3 | The gap between the proposal slot and the last slot with a block reaches this value |
+| <Flag name="max-builder-epoch-missed-slots" /> | 5 | The number of empty slots in the last 32 slots reaches this value |
+
+When a breaker trips, the node logs `Circuit breaker activated due to missing consecutive slot` or `Circuit breaker activated due to missing enough slots last epoch`. The messages end with `Ignore if mev-boost is not used`, because the check also runs on nodes without MEV-Boost. Lower values fall back to local blocks sooner; keep the defaults unless you have a reason.
+
+## Builder or local block
+
+Up to the Fulu fork, the beacon node compares the builder bid with the value of the local block and applies these checks in order. If any fails, it proposes the local block:
+
+1. The builder payload's withdrawals must match the local ones, and the bid must be above zero.
+2. The bid must be at least <Flag name="min-builder-bid" /> (Gwei). Otherwise the node logs `Proposer: using local execution payload because min bid not attained`.
+3. The bid must be at least the local value plus <Flag name="min-builder-to-local-difference" /> (Gwei). Otherwise: `Proposer: using local execution payload because min difference with local value was not attained`.
+4. The builder wins only if `bid × builder_boost_factor > local_value × (100 + local-block-value-boost)`, where <Flag name="local-block-value-boost" /> defaults to 10 and `builder_boost_factor` comes from the validator client's request (100 by default). Otherwise: `Proposer: using local execution payload because higher value`.
+
+With the defaults, a builder block must be worth more than 110% of the local block. Some examples:
+
+```bash
+# Take the builder block whenever it pays more at all
+--local-block-value-boost=0
+
+# Ignore bids under 0.01 ETH (10,000,000 Gwei)
+--min-builder-bid=10000000
+
+# Require at least 0.005 ETH more than the local block
+--min-builder-to-local-difference=5000000
+```
+
+If you also change `builder_boost_factor` on the validator client side, both adjustments apply and the beacon node logs a warning.
+
+## Fee recipient
+
+The fee recipient is normally set on the validator client ([Fee recipient and proposer settings](/validators/fee-recipient/)). <Flag name="suggested-fee-recipient" /> on the beacon node is only a fallback: it's used when the validator client sends no address or the zero address, and for payloads prepared for validators it doesn't know (see <Flag name="prepare-all-payloads" />). A value sent by the validator client always wins.
+
+At startup the node logs `Default fee recipient is set to …`. Without the flag it warns that fees would go to the burn address.
+
+<Aside type="caution">
+An invalid address is ignored with only a warning, leaving the burn address as the fallback. Check the `Default fee recipient is set to` line after changing it.
+</Aside>
+
+## Graffiti
+
+The validator client sets the graffiti text (see [Graffiti](/validators/graffiti/)). The beacon node then appends client identifiers when space allows: the execution client's two-letter code and commit, then `PM` and the Prysm commit, for example `Sushi GEabcdPMe4f6`. The longer your text, the shorter the suffix, down to nothing. It logs `Graffiti includes client version info appended after user graffiti` when it does this.
+
+<Flag name="disable-graffiti-client-append" /> keeps the graffiti exactly as the validator client sends it.
+
+## Proposal reliability
+
+- <Flag name="postpone-shutdown-for-proposals" /> delays a graceful shutdown (SIGINT or SIGTERM) while a connected validator client has a proposal in the current or next epoch, logging `Postponing shutdown: a connected validator client has an upcoming block proposal`. A second signal stops the node immediately. Raise your service manager's stop timeout (systemd `TimeoutStopSec`, Docker `--stop-timeout`) or it kills the process first; the wait can last up to two epochs (about 13 minutes).
+- <Flag name="enable-proposer-preprocessing" /> verifies the signatures in a block before proposing it, so the node never proposes a block with an invalid signature in it. It costs a little CPU per proposal.
+- <Flag name="prepare-all-payloads" /> asks the execution client to prepare a payload every slot and emits the `payload_attributes` event every slot. Builders and relays need this; stakers don't.
+
+## Pitfalls
+
+- **Blocks are always local even with MEV-Boost running.** The validator client doesn't register validators (no `--enable-builder` or builder settings), a circuit breaker is tripped, or bids don't pass the thresholds. The `Proposer: using local execution payload because …` log tells you which.
+- **Fees go to the wrong address.** The validator client's setting wins over the beacon node's. Check proposer settings first.
+- **Missed proposals after tuning.** Put `--builder-header-timeout` back to its default.

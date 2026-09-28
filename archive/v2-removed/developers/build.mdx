@@ -1,0 +1,164 @@
+---
+title: Build with Bazel
+description: Build the beacon-chain, validator, prysmctl and client-stats binaries with Bazel, choose between development, release and minimal-preset builds, cross-compile, and find the outputs.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+
+Build Prysm's binaries from your working tree. Use this when you change code and want a binary to run, test by hand or ship.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/): Bazelisk, a clone of the repository and, on macOS, the Xcode Command Line Tools.
+- Run every command from the root of the repository.
+
+## Binary targets
+
+Each binary is a `go_binary` target named after its directory under `cmd/`:
+
+| Target | Binary | What it is |
+| --- | --- | --- |
+| `//cmd/beacon-chain` | `beacon-chain` | The beacon node. |
+| `//cmd/validator` | `validator` | The validator client. |
+| `//cmd/prysmctl` | `prysmctl` | Command-line tool for checkpoint sync downloads, database inspection, exits, withdrawals and testnet genesis. |
+| `//cmd/client-stats` | `client-stats` | Collects metrics from a beacon node and validator and sends them to a stats service. |
+
+`//cmd/beacon-chain` is shorthand for `//cmd/beacon-chain:beacon-chain`. List every target in a package with `bazel query //cmd/beacon-chain:all`.
+
+## Build the binaries
+
+<Steps>
+
+1. Build the beacon node and validator client.
+
+   ```bash
+   bazel build //cmd/beacon-chain //cmd/validator
+   ```
+
+   Bazel prints where each output landed:
+
+   ```text
+   Target //cmd/beacon-chain:beacon-chain up-to-date:
+     bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain
+   Target //cmd/validator:validator up-to-date:
+     bazel-bin/cmd/validator/validator_/validator
+   INFO: Build completed successfully, …
+   ```
+
+2. Build `prysmctl` and `client-stats` if you need them.
+
+   ```bash
+   bazel build //cmd/prysmctl //cmd/client-stats
+   ```
+
+3. Check a binary runs.
+
+   ```bash
+   bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain --version
+   ```
+
+</Steps>
+
+To build everything in the repository, including tests and tools, run `bazel build //...`. It takes much longer and you rarely need it.
+
+## Where outputs land
+
+Bazel writes outputs into its output base and creates symlinks in the repository root:
+
+| Symlink | Contents |
+| --- | --- |
+| `bazel-bin/` | Built files for the last configuration you built. Go binaries are at `bazel-bin/<package>/<name>_/<name>`. |
+| `bazel-out/` | All configurations. Each one has its own directory, for example `darwin_arm64-fastbuild` or `k8-opt`. |
+| `bazel-testlogs/` | Test logs and outputs. See [Unit tests](/developers/unit-tests/#read-test-logs). |
+| `bazel-prysm/` | The execution root, where actions run. |
+
+The `bazel-bin` symlink follows the last build. If you build with `--config=release` and then without it, `bazel-bin` points to the development build again. To find the output of a specific configuration, ask Bazel:
+
+```bash
+bazel cquery --config=release --output=files //cmd/beacon-chain
+```
+
+Copy a binary out of `bazel-bin` before you install it somewhere. The files in `bazel-out` are read-only and Bazel may replace them on the next build.
+
+## Build configurations
+
+Without a `--config`, Bazel builds a development binary (`fastbuild`): unoptimized for fast compilation and not stamped with a version. Pick a config for anything else:
+
+| Command | Result |
+| --- | --- |
+| `bazel build //cmd/beacon-chain` | Development build. Fast to compile, with the default mainnet preset. |
+| `bazel build --config=release //cmd/beacon-chain` | Release build: `-c opt`, stamped with the git commit and tag, profile-guided optimization using `cmd/beacon-chain/pprof.beacon-chain.samples.cpu.pb.gz`, and stripped symbols. This is how official binaries are built. |
+| `bazel build --config=minimal //cmd/beacon-chain` | Minimal-preset build, for local devnets that use `preset: minimal`. |
+| `bazel build -c dbg //cmd/beacon-chain` | Debug build without optimizations or inlining, for [debuggers](/developers/run-from-source/#attach-a-debugger). |
+| `bazel build --config=cgo_symbolizer //cmd/beacon-chain` | Debug build that also symbolizes C frames in stack traces and profiles. |
+
+<Aside type="caution" title="Presets are compiled in">
+The minimal preset changes the size of SSZ types at compile time, so a `--config=minimal` binary can only follow minimal-preset chains, and a default build can only follow mainnet-preset chains, which includes mainnet and every public testnet.
+</Aside>
+
+### Stamping and the version string
+
+The release config sets `--stamp`, which runs `hack/workspace_status.sh` and links the git commit (`STABLE_GIT_COMMIT`), tag (`STABLE_GIT_TAG`) and build date into `runtime/version`. The version then reads `Prysm/<tag>/<commit>`. Unstamped builds skip this step so a new commit doesn't force a relink, and look up the commit at run time with `git rev-parse HEAD` instead.
+
+### blst builds
+
+Prysm verifies BLS signatures with the [blst](https://github.com/supranational/blst) C library. `.bazelrc` sets `--define blst_disabled=false` for every build. `--config=blst_disabled` builds without blst, which you only need when working on code that must not depend on it.
+
+By default, blst is compiled in portable mode (`-D__BLST_PORTABLE__`, in `third_party/blst/blst.BUILD`), which runs on any CPU of the target architecture. On Linux x86-64, `--define=blst_modern=true` drops portable mode for a build that needs the ADX instructions of newer CPUs.
+
+## Cross-compile
+
+`build/bazelrc/cross.bazelrc` defines a config per target platform:
+
+| Config | Target |
+| --- | --- |
+| `--config=linux_amd64` | Linux x86-64 |
+| `--config=linux_arm64` | Linux ARM64 |
+| `--config=osx_amd64` | macOS Intel |
+| `--config=osx_arm64` | macOS Apple silicon |
+| `--config=windows_amd64` | Windows x86-64 |
+
+For example, to build a release `beacon-chain` for Linux ARM64:
+
+```bash
+bazel build --config=release --config=linux_arm64 //cmd/beacon-chain
+```
+
+All of these except `linux_amd64` use Prysm's multi-arch C toolchain (`--config=cross`, defined in `tools/cross-toolchain/`), which needs clang and the cross compilers (osxcross, mingw-w64) installed on the host. `tools/cross-toolchain/Dockerfile` shows exactly what's needed. If you'd rather not install them, add `_docker` to the config name (`--config=linux_arm64_docker`) to run every action in the toolchain's Docker image. That works only from a Linux x86-64 host, and it's very slow.
+
+<Aside type="tip">
+You don't need a cross-compile config to build a Linux container image on macOS. The image targets switch to a Linux platform on their own. See [Build Docker images](/developers/docker-images/).
+</Aside>
+
+## Caching
+
+Bazel rebuilds only what changed, so the second build after a small edit takes seconds. A few habits keep it that way:
+
+- **Don't switch configs back and forth needlessly.** Each config (`release`, `minimal`, `-c dbg`) has its own output directory. Switching doesn't throw away earlier results, but the first build in each config compiles everything.
+- **Use a disk cache** (`build --disk_cache=…` in `~/.bazelrc`) to keep results across `bazel clean` and across clones. See [Your own settings](/developers/environment/#your-own-settings).
+- **Avoid `bazel clean --expunge`** unless the toolchain setup itself is broken. It deletes the downloaded dependencies too.
+- **Keep your environment stable.** `.bazelrc` already sets `--incompatible_strict_action_env`. `bazel.sh` in the repository root goes further: it runs Bazel with an almost empty environment. Use it in scripts where a changing environment variable would otherwise cause cache misses.
+
+## Check that it works
+
+Run the binary you built with `--help` and check its version:
+
+```bash
+bazel-bin/cmd/validator/validator_/validator --version
+```
+
+A release build shows the tag and commit of your checkout in the `Prysm/<tag>/<commit>` part.
+
+## Troubleshooting
+
+**`bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain: No such file or directory` after a successful build.** `bazel-bin` points at the last configuration you built. If your last command used a different config, rebuild with the one you want or use `bazel cquery --output=files`.
+
+**A cross-compile fails with a missing `clang` or `osxcross` compiler.** The `cross` configs need the toolchain from `tools/cross-toolchain/Dockerfile` on the host. Use the `_docker` variant of the config from a Linux x86-64 host instead.
+
+**`ERROR: … no such package '@…'` on the first build.** Bazel couldn't download a dependency. Check your network and proxy, then run the build again. Bazel resumes where it stopped.
+
+## Next steps
+
+- [Run from source](/developers/run-from-source/)
+- [Build Docker images](/developers/docker-images/)
+- [Unit tests](/developers/unit-tests/)

@@ -1,0 +1,200 @@
+---
+title: Install on Windows
+description: Download, verify and run Prysm on Windows with the prysm.bat or prysm.ps1 launcher, and keep it running as a Windows service.
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Prysm runs on 64-bit Windows. The Prysm repository has two launcher scripts that download the latest release, check its SHA-256 checksum and start it: `prysm.bat` for Command Prompt and `prysm.ps1` for PowerShell. They're the Windows counterparts of [`prysm.sh`](/install/prysm-sh/), with fewer features. This page shows how to use them, how they differ, and how to run Prysm as a service.
+
+## Before you begin
+
+- 64-bit Windows 10 or 11 (the scripts refuse to run on 32-bit Windows). `curl` and `certutil`, which `prysm.bat` needs, ship with Windows 10 and later.
+- An internet connection each time you start Prysm through a script.
+- A folder layout like the one in the [Quickstart](/get-started/quickstart/): `C:\ethereum\consensus`, `C:\ethereum\execution`, and the JWT secret at `C:\ethereum\jwt.hex`.
+
+## Install prysm.bat
+
+<Steps>
+
+1. Open **Command Prompt** (not as Administrator) and create the folders:
+
+   ```powershell
+   mkdir C:\ethereum\consensus C:\ethereum\execution
+   cd C:\ethereum\consensus
+   ```
+
+2. Download the script:
+
+   ```powershell
+   curl https://raw.githubusercontent.com/OffchainLabs/prysm/master/prysm.bat --output prysm.bat
+   ```
+
+3. Turn on colored output in Windows consoles. Prysm's logs and the script's messages use ANSI color codes, which the classic console only renders with this setting:
+
+   ```powershell
+   reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1
+   ```
+
+   This changes a per-user setting (`HKEY_CURRENT_USER\Console`) and takes effect in new console windows. Without it, you see codes such as `[32m` around messages; nothing else breaks.
+
+4. Download and check the beacon node by asking it for its version:
+
+   ```powershell
+   prysm.bat beacon-chain --version
+   ```
+
+   You should see the script pick the latest release, download it into `dist`, print `SHA256 Hash Match!`, and then the version line, for example `beacon-chain version Prysm/v7.2.0/...`.
+
+</Steps>
+
+Run the script from the folder that contains it. Both scripts create `dist` in the **current** directory, not next to the script, so running them from elsewhere downloads a second copy.
+
+## Run Prysm
+
+Pass the program name, then its flags:
+
+<Tabs>
+<TabItem label="Command Prompt">
+
+```powershell
+prysm.bat beacon-chain ^
+  --hoodi ^
+  --jwt-secret=..\jwt.hex ^
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="PowerShell">
+
+```powershell
+.\prysm.bat beacon-chain `
+  --hoodi `
+  --jwt-secret=..\jwt.hex `
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+</Tabs>
+
+Swap `--hoodi` for `--mainnet` on mainnet. Line continuations differ by shell: `^` in Command Prompt, a backtick `` ` `` in PowerShell. Nothing may follow the continuation character on the line, not even a space. In PowerShell, run scripts in the current folder with a leading `.\`.
+
+The scripts accept three programs: `beacon-chain`, `validator` and `client-stats`. **They don't support `prysmctl`.** Download `prysmctl-<version>-windows-amd64.exe` from the [release page](/install/binaries/) instead.
+
+The first time you start the beacon node or validator, Prysm asks you to accept its terms of use. Type `accept`, or pass <Flag name="accept-terms-of-use" />.
+
+### Allow Prysm through the firewall
+
+The first time the beacon node starts listening, Windows Defender Firewall asks whether to allow `beacon-chain-<version>-windows-amd64.exe` to communicate on networks. Allow it on **Private networks** so peers can connect on ports 13000 (TCP and UDP) and 12000 (UDP). If you click Cancel, Prysm still works but gets fewer peers.
+
+Because each release has a different file name, Windows may ask again after an update. To allow the ports once, whatever the binary, run this in an Administrator PowerShell:
+
+```powershell
+New-NetFirewallRule -DisplayName "Prysm P2P TCP" -Direction Inbound -Protocol TCP -LocalPort 13000 -Action Allow
+New-NetFirewallRule -DisplayName "Prysm P2P UDP" -Direction Inbound -Protocol UDP -LocalPort 12000,13000 -Action Allow
+```
+
+You also need to forward these ports on your router. See [Peers, ports and NAT](/setup/networking/).
+
+## prysm.bat and prysm.ps1 compared
+
+`prysm.ps1` does the same job from PowerShell. Download it with `curl https://raw.githubusercontent.com/OffchainLabs/prysm/master/prysm.ps1 --output prysm.ps1` and run `.\prysm.ps1 beacon-chain --hoodi ...`. If PowerShell refuses because scripts are disabled, allow it for the current window only with `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`.
+
+| | `prysm.bat` | `prysm.ps1` |
+| --- | --- | --- |
+| Programs | `beacon-chain`, `validator`, `client-stats` | Same |
+| Download location | `dist` in the current directory | Same |
+| Checksum check | SHA-256 with `certutil`, every start | SHA-256 with `Get-FileHash`, every start |
+| GPG signature check | No (prints a warning) | No (prints a warning) |
+| Latest-version lookup | Always, even when a version is pinned | Skipped when a version is pinned |
+| Pin a version | `set USE_PRYSM_VERSION=v7.2.0` | `$env:USE_PRYSM_VERSION="v7.2.0"` |
+| `modern` beacon node build | `set USE_PRYSM_MODERN=1` requests it, but no Windows `modern` build is published, so the download fails | Not supported |
+| Restart after a crash | `set PRYSM_AUTORESTART=1` (any value) | `$env:PRYSM_AUTORESTART=$TRUE` |
+| Skip failed checksum | `set PRYSM_ALLOW_UNVERIFIED_BINARIES=1` | `$env:PRYSM_ALLOW_UNVERIFIED_BINARIES=$TRUE` |
+| After a clean exit | Waits for a key press (`pause`) | Returns to the prompt |
+
+Clear a variable with `set USE_PRYSM_VERSION=` in Command Prompt, or `Remove-Item env:USE_PRYSM_VERSION` in PowerShell.
+
+:::caution[No signature check on Windows]
+Both scripts only compare the binary with the `.sha256` file downloaded from the same server, and say so with `WARN GPG verification is not natively available on Windows`. A checksum from the same source protects against corrupted downloads, not a compromised server. To check the signature too, install [Gpg4win](https://www.gpg4win.org/) and follow [Verify the download](/install/binaries/#verify-the-download) with `gpg.exe`.
+:::
+
+`prysm.sh` also runs in Git Bash or MSYS2 on Windows. It then downloads the Windows `.exe` builds and checks their GPG signature if `gpg` is available in that shell.
+
+## Run Prysm as a Windows service
+
+Windows has no built-in way to run a console program such as Prysm as a service. A common choice is **[NSSM](https://nssm.cc/), the Non-Sucking Service Manager**. NSSM is third-party software, not maintained or audited by the Prysm team; review it before you install it.
+
+Point NSSM at the release binary, not at `prysm.bat`: a service shouldn't update itself on restart, and `prysm.bat` waits for a key press when Prysm exits.
+
+<Steps>
+
+1. Download the release binaries and verify them as described in [Release binaries](/install/binaries/). Put them in a folder such as `C:\ethereum\bin`.
+
+2. In an Administrator Command Prompt, create the service. Set the data directory explicitly: services run as the `LocalSystem` account by default, so Prysm's default data directory would be in that account's profile.
+
+   ```powershell
+   nssm install prysm-beacon C:\ethereum\bin\beacon-chain-v7.2.0-windows-amd64.exe ^
+     --hoodi ^
+     --datadir=C:\ethereum\consensus\beacon ^
+     --jwt-secret=C:\ethereum\jwt.hex ^
+     --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc ^
+     --accept-terms-of-use
+   ```
+
+3. Send log output to a file with rotation, and give Prysm time to shut down. NSSM stops a service by sending Ctrl-C and waiting 1,500 ms by default, which is too short for a beacon node to close its database:
+
+   ```powershell
+   nssm set prysm-beacon AppStdout C:\ethereum\consensus\beacon.log
+   nssm set prysm-beacon AppStderr C:\ethereum\consensus\beacon.log
+   nssm set prysm-beacon AppRotateFiles 1
+   nssm set prysm-beacon AppRotateBytes 104857600
+   nssm set prysm-beacon AppStopMethodConsole 60000
+   ```
+
+4. Start the service and check it:
+
+   ```powershell
+   nssm start prysm-beacon
+   nssm status prysm-beacon
+   ```
+
+   `nssm status` should print `SERVICE_RUNNING`, and `beacon.log` should show the beacon node starting.
+
+</Steps>
+
+Create the validator service the same way, with `validator-<version>-windows-amd64.exe` and its own log file. To update, stop the services, change the binary path with `nssm set prysm-beacon Application <NEW_PATH>`, and start them again. {/* VERIFY: NSSM commands checked against https://nssm.cc/usage (NSSM 2.24), 2026-09; not tested on Windows. */}
+
+An alternative is to run Prysm under Linux in WSL 2 and follow [Run with systemd](/setup/systemd/). WSL 2 uses its own virtual network, so inbound P2P connections need extra port forwarding from Windows.
+
+## Check that it works
+
+In a new window, from the `consensus` folder:
+
+```powershell
+curl http://localhost:3500/eth/v1/node/version
+curl http://localhost:3500/eth/v1/node/syncing
+```
+
+The first returns the running version, such as `"Prysm/v7.2.0-03f3712 (windows amd64)"`. The second shows sync progress. See [Check node and validator health](/operate/check-health/).
+
+## Troubleshooting
+
+**`ERROR: PROCESS missing or invalid`**
+The first argument must be `beacon-chain`, `validator` or `client-stats`. For `prysmctl`, use the `.exe` from the release page.
+
+**`ERROR Failed to verify Prysm binary.`**
+Delete the binary and its `.sha256` and `.sig` files from `dist` and run the script again. Antivirus software that quarantines or modifies files in `dist` also causes this; add an exclusion for the folder.
+
+**`Starting prysm requires an internet connection...`**
+`prysm.bat` looks up the latest release on every start, even with `USE_PRYSM_VERSION` set. Check your connection and any antivirus or proxy that blocks `curl`, or download the release binaries directly.
+
+**Log lines full of `[32m` and `[0m`**
+Run the `reg add HKCU\Console ...` command from [Install prysm.bat](#install-prysmbat) and open a new window, or use Windows Terminal.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Peers, ports and NAT](/setup/networking/)
+- [Update and roll back](/install/update/)

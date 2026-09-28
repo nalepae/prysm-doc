@@ -1,0 +1,101 @@
+---
+title: Blobs and PeerDAS
+description: What blobs are, how PeerDAS spreads blob data across nodes as data columns, how much your node custodies, and what that means for storage and bandwidth.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+Blobs are large chunks of data that rollups attach to Ethereum blocks. They are cheap because they aren't executed and are only kept for about 18 days. Since the Fulu fork, no node downloads every blob in full: with **PeerDAS**, each node stores and checks a share of the data, called its **custody**, and the network together guarantees the data was published.
+
+{/* Constants verified against Prysm config/params/mainnet_config.go and config/fieldparams/mainnet.go, 2026-09. */}
+
+## Blobs
+
+Blobs were introduced in the Deneb/Cancun fork by [EIP-4844](https://eips.ethereum.org/EIPS/eip-4844) ("proto-danksharding"):
+
+- A blob is 131,072 bytes (128 KiB) of data, sent with a special blob transaction.
+- The block itself only contains a **KZG commitment** to each blob, a short cryptographic fingerprint. The EVM can't read blob contents, only verify proofs against the commitment.
+- Blobs have their own fee market (blob gas), separate from normal gas.
+- Consensus clients store blob data for 4,096 epochs, about 18 days, then delete it. That's enough for rollups and anyone else to fetch and archive the data they need.
+
+The number of blobs allowed per block has grown over time. The Electra fork raised the maximum from 6 to 9 ([EIP-7691](https://eips.ethereum.org/EIPS/eip-7691)). Since Fulu, **blob-parameter-only (BPO) forks** ([EIP-7892](https://eips.ethereum.org/EIPS/eip-7892)) raise it further without a full upgrade:
+
+| Mainnet | Epoch | Date | Max blobs per block |
+| --- | --- | --- | --- |
+| Electra | 364032 | May 7, 2025 | 9 |
+| BPO 1 | 412672 | December 9, 2025 | 15 |
+| BPO 2 | 419072 | January 7, 2026 | 21 |
+
+Prysm reads the schedule from its network config (`BlobSchedule`); you don't need to do anything at a BPO fork other than run a release that knows about it.
+
+## PeerDAS
+
+Downloading every blob doesn't scale: 21 blobs of 128 KiB in every block would be more than most home connections should carry. Fulu introduced **peer data availability sampling** ([EIP-7594](https://eips.ethereum.org/EIPS/eip-7594)):
+
+1. Each blob is **extended** with erasure coding to twice its size, then cut into 128 **cells**. Any half of the cells is enough to rebuild the whole blob.
+2. Cell number *i* of every blob in a block forms **data column** *i*. A block's blob data is published as 128 **data column sidecars**, each with the cells, their KZG proofs and a proof that they belong to the block.
+3. Columns are spread over 128 gossip subnets. Each node subscribes to the subnets for the columns it custodies and checks that those columns are available before it treats the block as valid.
+4. Because any 64 columns are enough to reconstruct everything, the data is recoverable as long as enough nodes each hold their share.
+
+The result is that a normal node downloads a fraction of each block's blob data instead of all of it, and the network can safely carry more blobs.
+
+### Getting blobs from the execution client
+
+Blob transactions travel through the execution client's mempool before they're included, so the EL often already has a block's blobs. Prysm asks for them with `engine_getBlobs` and computes the columns itself, instead of waiting for them to arrive on gossip. This saves bandwidth and time.
+
+**Partial columns** go a step further. When the EL is missing some blobs, Prysm builds partial columns from what it has and asks peers for only the missing cells, rather than downloading full columns. It needs an execution client that supports `engine_getBlobsV3`, and falls back to full columns with peers that don't support it. In Prysm <PrysmVersion /> it's off by default; enable it with <Flag name="partial-data-columns" />.
+
+{/* Prysm HEAD after v7.2.0 (#17545) turns partial columns on by default and replaces the flag with --disable-partial-data-columns. Update this paragraph when that ships in a release. */}
+
+## Custody
+
+A node's custody is counted in **custody groups**. Mainnet has 128 groups of one column each, so "custody groups" and "columns" are the same number in practice.
+
+| Node | Custody groups | Can serve full blobs over the Beacon API |
+| --- | --- | --- |
+| Beacon node with no validators | 4 (and it samples at least 8 columns per slot) | No |
+| Beacon node with validators attached | 1 per 32 ETH of attached effective balance, at least 8, at most 128 | Only if that reaches 64 |
+| <Flag name="semi-supernode" /> | At least 64, the minimum needed to reconstruct every blob | Yes |
+| <Flag name="supernode" /> (alias `--subscribe-all-data-subnets`) | All 128 | Yes |
+
+"Attached" validators are the ones the beacon node serves: those whose validator clients connect to it and subscribe for duties. The count uses their effective balance, so a single 2,048 ETH validator counts like sixty-four 32 ETH validators.
+
+Two consequences for operators:
+
+- **Custody only goes up.** Prysm never lowers a node's custody count on its own, because peers rely on it. Removing validators from a node doesn't reduce its storage.
+- **Blob data for applications.** Beacon API endpoints that return whole blobs (`/eth/v1/beacon/blobs/{block_id}`, and blob sidecars) need at least 64 columns. On a smaller node Prysm returns an error suggesting `--semi-supernode`. If you run a rollup node, an L2 sequencer, or anything else that reads blobs from your beacon node, use `--semi-supernode` or `--supernode`.
+
+## Retention
+
+Blob data is kept for 4,096 epochs (about 18 days) before and after Fulu. Prysm deletes older data automatically.
+
+- <Flag name="blob-retention-epochs" /> keeps it longer. It applies to both pre-Fulu blobs and data columns. Values below 4,096 are rejected at startup.
+- <Flag name="blob-path" /> and <Flag name="data-column-path" /> move blob and column storage to other disks. By default they live in `blobs` and `data-columns` directories next to the beacon database.
+
+See [Storage, pruning and archive nodes](/operate/storage/).
+
+## Storage and bandwidth
+
+Each cell is 2,048 bytes plus a 48-byte proof. For each column a node custodies, it stores about 2 KiB per blob per block. Multiplying out gives an **upper bound** for the retention window at 21 blobs in every block:
+
+| Custody | Per block, at 21 blobs | Over 4,096 epochs, every block full |
+| --- | --- | --- |
+| 8 columns | ~350 KB | ~46 GB |
+| 64 columns (semi-supernode) | ~2.8 MB | ~370 GB |
+| 128 columns (supernode) | ~5.6 MB | ~740 GB |
+
+These are ceilings computed from the protocol constants, not measurements: real blocks carry fewer blobs than the maximum on average, so actual usage is lower. Bandwidth scales the same way, with gossip overhead on top. For measured bandwidth figures, see the Ethereum Foundation's [Fusaka bandwidth estimation](https://ethpandaops.io/posts/fusaka-bandwidth-estimation/).
+
+<Aside type="tip">
+If you're sizing a new machine, the custody column is the one to plan for: a home staker with a few validators stays near the first row, a large operator or a node serving rollups moves toward the last.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="System requirements" description="Disk, memory and bandwidth for each kind of node." href="/get-started/system-requirements/" />
+	<LinkCard title="Sync and storage flags" description="Retention, storage paths and custody flags." href="/flags/sync-and-storage/" />
+	<LinkCard title="Networking flags" description="Peers, subnets and gossip." href="/flags/networking/" />
+</CardGrid>
