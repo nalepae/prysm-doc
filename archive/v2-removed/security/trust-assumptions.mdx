@@ -1,0 +1,113 @@
+---
+title: Trust assumptions
+description: The outside parties a Prysm node relies on - checkpoint sync providers, MEV relays, remote signers, the execution client and others - what each could do to you, and how to reduce that trust.
+---
+
+import Flag from '@site/src/components/Flag';
+
+A node that validates everything itself still relies on some outside parties. For each one below: what you trust it to do, what happens if it fails or lies, and how to limit the damage.
+
+| You trust | To | If it lies or fails | Reduce it by |
+| --- | --- | --- | --- |
+| Checkpoint sync provider | Give you a state on the real chain | You could sync to a fake chain | Checking the finalized root against several sources |
+| MEV relay | Reveal the payload after you sign | You miss the proposal | Choosing relays carefully; local-building fallbacks |
+| Third-party beacon node or RPC | Give correct data | Missed duties, privacy loss | Running your own node |
+| Launchpad and deposit tools | Create correct deposits | Funds sent to an attacker | Official sources, offline use, checking credentials |
+| Remote signer | Sign only safe messages | Slashing, if two signers disagree | One signer per key, with its own slashing protection |
+| Execution client | Validate transactions and payloads | Following an invalid chain | Keeping it updated; client diversity |
+| Monitoring and SaaS tools | Handle what you send them | Privacy loss, or worse if you give them secrets | Sending only metrics, never keys or tokens |
+
+## Checkpoint sync provider
+
+[Checkpoint sync](/setup/checkpoint-sync/) with <Flag name="checkpoint-sync-url" /> starts your beacon node from a recent finalized state downloaded from another beacon node. Prysm checks that the state and block match each other, but it can't tell whether they belong to the real chain. A malicious provider could start you on a fake chain.
+
+In practice the risk is low, since a fake chain would have to be built and kept up with, and you'll notice if your validators stop earning. It's still cheap to check:
+
+1. After the node syncs, get the root of a finalized block from your own node:
+
+   ```bash
+   curl -s http://127.0.0.1:3500/eth/v1/beacon/headers/finalized
+   ```
+
+   Note `data.header.message.slot` and `data.root`.
+
+2. Look up the same slot on at least two independent sources: [block explorers](/resources/block-explorers/), a friend's node, or other providers from the community [list of checkpoint sync endpoints](https://eth-clients.github.io/checkpoint-sync-endpoints/) (`/eth/v1/beacon/headers/<SLOT>` on providers that serve the Beacon API). The block roots must match.
+
+To make the check automatic, pass <Flag name="weak-subjectivity-checkpoint" /> with a `block_root:epoch` you obtained from a source you trust. Prysm then refuses to follow a chain that doesn't contain that checkpoint. `prysmctl weak-subjectivity checkpoint` computes a current checkpoint from a beacon node you already trust.
+
+<Flag name="genesis-beacon-api-url" /> has the same trust model for the genesis state.
+
+## MEV relays
+
+With [MEV-Boost](/validators/mev-boost/), a relay sends your validator a block header and bid. Your validator signs the header *before* seeing the block's contents, and the relay then publishes the full block. You trust the relay to:
+
+- **Reveal the payload.** If it doesn't, the slot is missed. Your validator can't fall back to a local block for that slot, because signing a second block would be a slashable double proposal.
+- **Report the bid honestly.** The relay is responsible for checking that the builder's block pays your fee recipient what it claims.
+- **Deliver a valid block.** An invalid payload also means a missed slot.
+
+Relays can't get you slashed or take your stake. The risk is missed proposals and lost fees.
+
+To reduce it:
+
+- Use relays with a public track record, and configure several so one misbehaving relay doesn't affect every proposal.
+- Keep Prysm's circuit breakers: after <Flag name="max-builder-consecutive-missed-slots" /> consecutive missed slots, or <Flag name="max-builder-epoch-missed-slots" /> missed slots in the last epoch, on the network, the beacon node builds blocks locally instead of using relays.
+- <Flag name="local-block-value-boost" /> and <Flag name="min-builder-bid" /> make your node prefer its own block unless the relay's bid is clearly better.
+
+Relays also see your validator's registration and IP address, and some filter transactions. Choose relays whose policies you're comfortable with. See [MEV and block building](/learn/mev-and-block-building/).
+
+## Third-party beacon nodes and public RPCs
+
+Pointing your validator client at someone else's beacon node, or your wallet at a public RPC, means trusting them with correct data and with knowledge of your validators and IP address.
+
+- A dishonest or broken beacon node can make your validator miss duties or attest to the wrong head. Prysm's local [slashing protection](/security/avoid-slashing/#prysms-slashing-protection-database) still refuses to sign conflicting messages, whatever the beacon node says.
+- A public RPC can lie about balances and transactions to your wallet, and records the addresses you query.
+
+Run your own beacon node and execution client for anything that matters. A public RPC is acceptable for occasional read-only lookups.
+
+## Launchpad and deposit tooling
+
+Deposits are irreversible. Trust only:
+
+- **The official launchpad:** [launchpad.ethereum.org](https://launchpad.ethereum.org/) for mainnet, [hoodi.launchpad.ethereum.org](https://hoodi.launchpad.ethereum.org/) for Hoodi. Type the address; don't follow links from ads, DMs or search results.
+- **The deposit contract address** published on [ethereum.org](https://ethereum.org/en/staking/deposit-contract/). Check it on your wallet's screen before you sign.
+- **A verified key generation tool,** run offline, with the withdrawal address set to one you control. See [Protect your keys](/security/keys/).
+
+After the deposit, check on a [block explorer](/resources/block-explorers/) that the validator's withdrawal credentials contain your address. If you use a staking service to create keys or deposits for you, you're trusting it with all of this.
+
+## Remote signers
+
+A remote signer (see [Protect your keys](/security/keys/#remote-signers-and-hsms)) is trusted to sign only what's safe. Two things matter:
+
+- **Slashing protection must cover every path to the key.** If two validator clients use the same signer, the signer's slashing protection database is what stops a double vote. Web3Signer's is on by default and needs PostgreSQL; don't disable it.
+- **Access to the signer is access to the keys' signing power.** Keep it on a private network, reachable only from your validator clients.
+
+## Execution client
+
+The beacon node relies on the execution client to validate every block's transactions. If your execution client has a consensus bug, your node follows whatever it declares valid.
+
+- Keep it updated, and upgrade it for each hard fork.
+- Keep the Engine API private and authenticated. See [Expose APIs safely](/security/apis/#engine-api-and-the-jwt-secret).
+
+## Client diversity
+
+Client diversity protects you as well as the network. What a bug in one client does depends on how much of the network runs it:
+
+- **Under one third of stake:** the chain carries on without that client. Affected validators miss rewards until the bug is fixed.
+- **Over one third:** the chain stops finalizing. The inactivity leak slowly penalizes validators that aren't voting with the rest.
+- **Over two thirds:** a bug could finalize an invalid chain. Validators on that client can't return to the correct chain without risking slashing, and lose stake to the inactivity leak on the correct chain. This is the scenario that causes severe losses.
+
+Prefer consensus and execution clients that don't have a large share of the network. See [clientdiversity.org](https://clientdiversity.org/) for current figures, and [Switch to or from Prysm](/operate/switch-clients/) to change clients safely.
+
+## Monitoring and SaaS tools
+
+Dashboards, alerting services and explorers' monitoring apps are useful, and most only need public data: your validator indices or public keys.
+
+- Never give a tool your mnemonic, keystores, wallet password or Keymanager token. No monitoring service needs them.
+- Metrics you export can reveal how many validators you run and which ones. Send them only to services you trust, and prefer self-hosted Prometheus and Grafana. See [Metrics and dashboards](/operate/metrics/).
+- Browser extensions and "validator dashboards" that ask for your mnemonic or keystores are scams.
+
+## Next steps
+
+- [Security considerations](/security/)
+- [Checkpoint sync](/setup/checkpoint-sync/)
+- [Use MEV-Boost](/validators/mev-boost/)

@@ -1,0 +1,145 @@
+---
+title: Harden the host and network
+description: Lock down the machine that runs your node - updates, SSH, firewall, per-process users, file permissions, disk encryption, time sync and backups.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The staking machine holds your signing keys and controls your uptime. The aim is a machine that runs only your node, accepts only peer-to-peer traffic from the internet, and where each process can read only its own files. The commands below are for Ubuntu or Debian; adapt them for other distributions.
+
+## Dedicate the machine
+
+- Run only the node software on it: execution client, beacon node, validator client, and optionally MEV-Boost and monitoring. No web browsing, email, games or unrelated services.
+- Start from a clean OS install. Install software only from its official source.
+- Don't use administrator or `root` accounts for daily work, and never run the clients as `root`.
+
+## Keep it updated
+
+Enable automatic security updates for the OS, and plan client updates yourself so you're present when they restart.
+
+```bash
+sudo apt update && sudo apt install unattended-upgrades
+sudo dpkg-reconfigure --priority=low unattended-upgrades
+```
+
+Automatic updates can reboot the machine if you configure them to. A reboot only costs a few minutes of downtime, as long as your services start on boot. Make sure they do, and check after the first reboot. For Prysm and its companions, see [Update and roll back](/install/update/) and [Verify the software you run](/security/verify-software/).
+
+## Lock down SSH
+
+Use SSH keys, turn off password logins and direct `root` login. Add your public key to `~/.ssh/authorized_keys` and confirm key login works in a second session **before** you apply this:
+
+```ini title="/etc/ssh/sshd_config.d/10-hardening.conf"
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+```
+
+```bash
+sudo sshd -t && sudo systemctl reload ssh
+```
+
+Optionally restrict SSH to your own network or VPN in the firewall below, and use a tool such as `fail2ban` to slow down brute-force attempts.
+
+## Firewall: allow only P2P from the internet
+
+Default-deny inbound traffic, then open only the peer-to-peer ports. Every API stays on `127.0.0.1` and needs no firewall rule. See [Ports](/reference/ports/) for the full list.
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 22/tcp          # SSH, or restrict: sudo ufw allow from <YOUR_ADMIN_NETWORK> to any port 22 proto tcp
+sudo ufw allow 13000/tcp       # Prysm libp2p (TCP)
+sudo ufw allow 13000/udp       # Prysm libp2p (QUIC)
+sudo ufw allow 12000/udp       # Prysm discovery (discv5)
+sudo ufw allow 30303           # Execution client P2P (check your client's port)
+sudo ufw enable
+```
+
+<Aside type="caution" title="Docker bypasses ufw">
+Ports published with `docker run -p` or a Compose `ports:` entry are opened by Docker's own firewall rules, before `ufw` sees the traffic. Publish API ports only on localhost (`127.0.0.1:3500:3500`), or don't publish them at all and use a Docker network. See [Run with Docker Compose](/setup/docker-compose/).
+</Aside>
+
+On a home network, forward only the P2P ports on your router. Don't put the machine in a router "DMZ". See [Peers, ports and NAT](/setup/networking/).
+
+## One user per process
+
+Run each component as its own unprivileged system user, as in [Run with systemd](/setup/systemd/). A bug or compromise in the execution client then can't read your validator keys.
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin execution
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin beacon
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin validator
+```
+
+## File permissions
+
+| Path | Owner | Mode | Why |
+| --- | --- | --- | --- |
+| `/var/lib/ethereum/execution/` | `execution` | `700` | Execution client data |
+| `/var/lib/ethereum/beacon/` | `beacon` | `700` | Beacon database, and the node's P2P key if you use <Flag name="p2p-static-id" /> |
+| `/var/lib/ethereum/validator/` | `validator` | `700` | Wallet, slashing protection database, password file, Keymanager token |
+| `/var/lib/ethereum/jwt.hex` | `root`, group readable by `execution` and `beacon` | `640` | Engine API secret, needed by both clients and nobody else |
+
+```bash
+sudo chown -R execution:execution /var/lib/ethereum/execution
+sudo chown -R beacon:beacon /var/lib/ethereum/beacon
+sudo chown -R validator:validator /var/lib/ethereum/validator
+sudo chmod 700 /var/lib/ethereum/execution /var/lib/ethereum/beacon /var/lib/ethereum/validator
+
+sudo groupadd --system ethereum
+sudo usermod -aG ethereum execution
+sudo usermod -aG ethereum beacon
+sudo chown root:ethereum /var/lib/ethereum/jwt.hex
+sudo chmod 640 /var/lib/ethereum/jwt.hex
+```
+
+Prysm writes its own secrets (wallet files, the Keymanager auth token) with mode `600` on Linux and macOS, but the directory around them is up to you.
+
+## Disk encryption
+
+Full-disk encryption protects your keys if the disk or machine is stolen, or when you return a cloud or rented server. The cost is that the machine can't boot unattended: after a power cut, someone has to enter the passphrase (or you need remote unlock, such as `dropbear-initramfs`, or TPM-based unlock).
+
+Reasonable choices:
+
+- **Home staking with physical risk** (shared house, travel): encrypt, and accept that a reboot needs you.
+- **Unattended machine in a locked location:** you may skip full-disk encryption and rely on strong keystore and wallet passwords. The keys are encrypted at rest either way; the password file next to them is the weak point.
+
+## Time sync
+
+Validators must act at the right moment in each 12-second slot. A drifting clock causes missed and late duties (not slashing). Use `chrony` or `systemd-timesyncd` and check it's synchronized:
+
+```bash
+sudo apt install chrony
+chronyc tracking
+```
+
+Look for `Leap status : Normal` and a `System time` offset of a few milliseconds.
+
+## Physical and cloud considerations
+
+- **At home:** a UPS protects against short power cuts and disk corruption. Set the BIOS to power on after power loss. Keep the machine where visitors can't plug in a USB stick.
+- **In the cloud:** your provider and anyone with your cloud account can read the disk and memory. Protect the account with a hardware security key, restrict console and snapshot access, and don't bake keys into machine images. Avoid concentrating on one provider or region: correlated outages and correlated slashings both cost more.
+- **Hide your IP where you can.** Your beacon node's IP is visible to peers. Don't post it, or link it to your validator indices publicly.
+
+## Secure your backups
+
+A backup of the validator directory is as sensitive as the keys themselves, and restoring an old one is a slashing risk.
+
+- Encrypt backups (for example with `age` or `gpg`) and store the passphrase separately.
+- Don't sync the live validator directory to a cloud drive.
+- Label backups with the date, and never start a validator from a backup while the original may still be running. See [Back up and restore](/operate/backup-and-restore/) and [Avoid slashing](/security/avoid-slashing/).
+- The beacon and execution databases don't need backing up for security: they can be re-synced.
+
+## Check that it works
+
+- `sudo ufw status verbose` lists only SSH and the P2P ports.
+- `sudo ss -tlnp` shows the APIs (`3500`, `4000`, `8080`, `8081`, `8551`, and `7500` if enabled) bound to `127.0.0.1`, not `0.0.0.0`.
+- From another network, a port scan of your public IP shows only the P2P ports (and SSH if you allowed it).
+- `sudo -u execution ls /var/lib/ethereum/validator` fails with `Permission denied`.
+
+## Next steps
+
+- [Expose APIs safely](/security/apis/)
+- [Run with systemd](/setup/systemd/)
+- [Check node and validator health](/operate/check-health/)

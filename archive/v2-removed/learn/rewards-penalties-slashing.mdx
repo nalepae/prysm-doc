@@ -1,0 +1,100 @@
+---
+title: Rewards, penalties and slashing
+description: Where validator rewards come from, what being offline costs, how the inactivity leak works, and exactly which actions get a validator slashed.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+A validator earns small rewards for doing its duties on time and pays small penalties for missing them. Being offline is cheap: it costs a little less than what you would have earned in the same time. **Slashing** is different: it punishes signing contradictory messages, forcibly exits the validator, and can cost a large part of the stake. It never happens by accident of being offline; it happens when the same keys sign in two places.
+
+{/* Weights and quotients verified against Prysm config/params/mainnet_config.go, 2026-09. */}
+
+## Where rewards come from
+
+There are two separate income streams, paid to two different places.
+
+**Consensus rewards** are newly issued ETH, credited to the validator's balance on the beacon chain. They are split by weight:
+
+| Duty | Share of the ideal reward | Frequency |
+| --- | --- | --- |
+| Attestation: correct **target** vote | 26/64 (41%) | Every epoch |
+| Attestation: correct **source** vote | 14/64 (22%) | Every epoch |
+| Attestation: correct **head** vote | 14/64 (22%) | Every epoch |
+| **Proposing** a block (for the attestations and sync signatures it includes) | 8/64 (12.5%) | Rarely, at random |
+| **Sync committee** participation | 2/64 (3%) | 512 validators at a time, for about 27 hours |
+
+Each validator's rewards scale with its effective balance, and the per-validator rate falls as total stake grows (it is proportional to one over the square root of the total active stake).
+
+**Execution rewards** are the priority fees (tips) and MEV of the blocks you propose. They go to the **fee recipient** address you configure, on the execution layer, and are only earned when you propose. They vary a lot from block to block. Set the fee recipient with <Flag name="suggested-fee-recipient" bin="validator" /> or a proposer settings file: see [Fee recipient and proposer settings](/validators/fee-recipient/) and [MEV and block building](/learn/mev-and-block-building/).
+
+## Getting the most from attestations
+
+An attestation votes for three things, and each vote is rewarded only if it is correct **and** included in a block fast enough:
+
+- **Head:** the block at the head of the chain. Must be included in the next slot.
+- **Source:** the last justified checkpoint. Must be included within 5 slots.
+- **Target:** the checkpoint of the current epoch. Must be included by the end of the next epoch.
+
+A late or wrong head vote usually comes from seeing the block late: a beacon node with few peers, a slow machine, or a clock that's off. A missing attestation usually means the validator client or beacon node wasn't working. [Check node and validator health](/operate/check-health/) covers both.
+
+## Penalties for missing duties
+
+| Missed | Penalty |
+| --- | --- |
+| Attestation source vote | Minus the source reward (14/64) |
+| Attestation target vote | Minus the target reward (26/64) |
+| Attestation head vote | None; you only miss the reward |
+| Sync committee signature | Minus the sync committee reward you would have earned for that slot |
+| Block proposal | None; you lose that block's consensus and execution rewards |
+
+So a validator that is completely offline loses about three quarters of what it would have earned by attesting. Downtime of hours or days costs a similar amount of hours or days of rewards, and is recovered by staying online for the same time. The exception is sync committee duty: missing it for its full 27 hours costs noticeably more, because the reward per slot is larger.
+
+## The inactivity leak
+
+If the chain can't finalize for more than 4 epochs, which happens only when more than a third of all stake is offline or split, the protocol enters an **inactivity leak**:
+
+- Every validator that misses target votes accumulates an **inactivity score**: +4 per epoch missed, −1 per epoch attended.
+- Each epoch, a validator loses a fraction of its balance proportional to its score, so the penalty grows quadratically the longer it stays offline.
+- Attestation rewards are paused for everyone; online validators only avoid penalties.
+
+The leak drains offline stake until the online validators hold two thirds again and the chain finalizes. Validators whose effective balance falls to 16 ETH are ejected. Once finality returns, scores decay by 16 per epoch and the leak stops.
+
+This is the one situation where being offline becomes expensive fast. It's also why [client diversity](/get-started/introduction/#why-prysm) matters: a bug in a client used by more than a third of validators could trigger a leak.
+
+## Slashing
+
+A validator is slashed for provably contradicting itself. There are exactly three offenses:
+
+1. **Double proposal:** signing two different blocks for the same slot.
+2. **Double vote:** signing two different attestations with the same target epoch.
+3. **Surround vote:** signing an attestation whose source and target surround those of an earlier attestation (source earlier and target later), or are surrounded by it.
+
+Anyone who sees both messages can package them as evidence. Nodes running a [slasher](/operate/slasher/) look for these automatically, and the proposer that includes the evidence in a block receives a small whistleblower reward.
+
+### What happens to a slashed validator
+
+1. **Immediately:** a penalty of 1/4,096 of the effective balance (about 0.008 ETH for 32 ETH), and the validator is marked slashed and scheduled to exit.
+2. **Until it becomes withdrawable, 8,192 epochs (about 36 days) later:** it can't earn rewards and is penalized every epoch as if it were offline.
+3. **Halfway through, after about 18 days:** a **correlation penalty**. It is proportional to the validator's effective balance times three times the fraction of all stake slashed in the surrounding 36-day window. For an isolated slashing this is close to zero. If a third or more of all stake is slashed in that window, the validator loses its entire balance.
+
+The design punishes coordinated attacks severely and individual mistakes mildly. But every realistic accident, such as running a backup validator client with the same keys, can hit many validators at once, which makes the correlation penalty larger.
+
+### How Prysm prevents it
+
+- The validator client checks every block and attestation against its **slashing protection database** and refuses to sign anything that would conflict with its own history. When it refuses an attestation it logs `Failed attestation slashing protection check`.
+- <Flag name="enable-doppelganger" bin="validator" /> (off by default) makes the validator client check, at startup, whether your keys were live on chain over roughly the last 2–3 epochs, and refuse to start if they were. It's a useful safety net, not a guarantee: it can't catch a duplicate that was offline during the check.
+
+Slashing protection only knows what *this* client signed. If you move keys to a new machine or client, move the history too. See [Avoid slashing](/security/avoid-slashing/) and [Slashing protection history](/validators/slashing-protection/).
+
+<Aside type="danger" title="Offline is safe, duplicate is not">
+Being offline never gets you slashed. Running the same keys in two validator clients at once does. When in doubt, accept some downtime rather than risk a second copy running.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Avoid slashing" description="The setups that cause slashing and how to prevent them." href="/security/avoid-slashing/" />
+	<LinkCard title="Monitor specific validators" description="Track rewards, missed attestations and proposals." href="/operate/validator-monitoring/" />
+	<LinkCard title="Run a slasher" description="Detect slashable behavior on the network." href="/operate/slasher/" />
+</CardGrid>

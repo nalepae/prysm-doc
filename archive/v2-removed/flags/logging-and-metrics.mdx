@@ -1,0 +1,117 @@
+---
+title: Logging, metrics and debugging
+description: Beacon node flags for log verbosity and format, log files, Prometheus metrics and health checks, validator monitoring, pprof profiling and OpenTelemetry tracing.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The beacon node logs to the terminal at `info` level, keeps a one-day debug log in its data directory, and serves Prometheus metrics on `127.0.0.1:8080`. These flags change how much it logs and where, what the metrics port serves, and turn on profiling and tracing for debugging. To use the output, see [Read the logs](/operate/logs/) and [Metrics and dashboards](/operate/metrics/).
+
+## Verbosity
+
+<Flag name="verbosity" /> sets the minimum level printed to the terminal and to <Flag name="log-file" />: `trace`, `debug`, `info` (default), `warn`, `error`, `fatal` or `panic`. `debug` is useful for troubleshooting but noisy; `trace` is for developers.
+
+To raise the level for one area only, use <Flag name="log.vmodule" /> with `package=level` entries. The package is the Prysm path shown in the `package` field of JSON logs, such as `beacon-chain/sync` or `beacon-chain/p2p`. An entry also covers subpackages, and the longest match wins.
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --verbosity=info \
+  --log.vmodule=beacon-chain/sync=debug,beacon-chain/p2p=debug \
+  ...
+```
+
+Wildcards, leading or trailing slashes, spaces and duplicate entries are rejected at startup. `--log.vmodule` only works with the `text` log format.
+
+## Log format and files
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="log-format" /> | `text` | `text`, `json`, `fluentd` or `journald` |
+| <Flag name="log-file" /> | none | Also append logs to this file |
+| <Flag name="disable-log-colors" /> | off | No ANSI colors in terminal output |
+| <Flag name="disable-ephemeral-log-file" /> | off | Don't write the debug log in `<datadir>/logs/` |
+
+- **`text`** is for people and the only format that honors `--log.vmodule`.
+- **`json`** and **`fluentd`** write one JSON object per line, for log shippers such as Loki, Elasticsearch or Fluentd.
+- **`journald`** sends entries straight to the systemd journal. It works only on Linux; if the journal isn't reachable the node logs `Journal not available but user requests we log to it. Ignoring`. With systemd you usually don't need it: the journal already captures stdout, and `text` with `--disable-log-colors` reads well in `journalctl`.
+
+`--log-file` appends and never rotates the file, so pair it with logrotate. With formats other than `text`, the file is written in plain `key=value` form rather than JSON.
+
+**The ephemeral debug log.** Whatever `--verbosity` says, the node writes a debug-level copy of its logs to `<datadir>/logs/beacon-chain.log`. It rotates at 250 MB, keeps one backup and deletes files older than a day. It's there so you can attach recent debug logs to a bug report after something goes wrong. Turn it off with `--disable-ephemeral-log-file` if disk writes matter more to you.
+
+## Prometheus metrics
+
+The metrics server listens on <Flag name="monitoring-host" />:<Flag name="monitoring-port" /> (default `127.0.0.1:8080`) and serves:
+
+| Path | Content |
+| --- | --- |
+| `/metrics` | Prometheus metrics |
+| `/healthz` | Health status; HTTP 503 if any service reports an error |
+| `/goroutinez` | Goroutine dump |
+| `/p2p` | Peer summary |
+
+```bash
+curl -s http://127.0.0.1:8080/metrics | head
+```
+
+To scrape from another machine or container, set `--monitoring-host=0.0.0.0` and firewall the port. If another program already uses the port, the node keeps running without metrics and logs `Port already in use; cannot start prometheus service`; move one of them with `--monitoring-port`.
+
+<Flag name="disable-monitoring" /> turns the whole server off, including `/healthz`. Don't use it if a health check depends on that endpoint.
+
+## Validator monitoring
+
+<Flag name="monitor-indices" /> tracks specific validators by index (not public key), even if they're attached to another beacon node. After initial sync the node logs events such as `Proposed beacon block was included`, `Attestation included` and a periodic `Aggregated performance since launch`, and exports `monitor_*` metrics labeled by `validator_index`.
+
+```bash
+--monitor-indices=1234,5678
+```
+
+See [Monitor specific validators](/operate/validator-monitoring/).
+
+## Health checks
+
+`/healthz` on the monitoring port returns HTTP 503 when a service reports an error, for example when the node is optimistic (the execution client isn't validating) or when the average goroutine count exceeds <Flag name="healthz-max-goroutines" /> (default 5000). Raise that threshold only if a healthy node under heavy load trips the check. See [Check node and validator health](/operate/check-health/).
+
+## Profiling
+
+<Flag name="pprof" /> starts Go's standard pprof server at `http://<pprofaddr>:<pprofport>/debug/pprof/` (default `127.0.0.1:6060`) and logs `Starting pprof server`. It costs nothing until you request a profile:
+
+```bash
+go tool pprof http://127.0.0.1:6060/debug/pprof/heap
+curl -s http://127.0.0.1:6060/debug/pprof/goroutine?debug=2 > goroutines.txt
+```
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="pprofaddr" /> | `127.0.0.1` | Interface; keep it local, the endpoints have no authentication |
+| <Flag name="pprofport" /> | 6060 | Port |
+| <Flag name="blockprofilerate" /> | 0 (off) | Sample blocking events for `/debug/pprof/block` |
+| <Flag name="mutexprofilefraction" /> | 0 (off) | Sample mutex contention for `/debug/pprof/mutex` |
+| <Flag name="memprofilerate" /> | 524288 | Bytes per heap allocation sample (Go's default) |
+| <Flag name="gc-percent" /> | Go default | Garbage collection target, like `GOGC`; lower saves memory, costs CPU |
+
+The Prysm team may ask for these profiles when you report a performance problem.
+
+## Tracing
+
+<Flag name="enable-tracing" /> exports OpenTelemetry spans over OTLP/HTTP, with service name `beacon-chain`. It adds overhead, so use it for debugging rather than permanently.
+
+```bash
+--enable-tracing \
+--tracing-endpoint=http://127.0.0.1:4318/v1/traces \
+--tracing-process-name=beacon-hoodi-1 \
+--trace-sample-fraction=0.1
+```
+
+- <Flag name="tracing-endpoint" /> is the full URL including the path. The default, `http://127.0.0.1:14268/api/traces`, is the old Jaeger collector path; for an OpenTelemetry Collector, Tempo or recent Jaeger, use the OTLP/HTTP receiver, usually port 4318 with `/v1/traces`.
+- <Flag name="trace-sample-fraction" /> is the fraction of traces kept (default 0.2).
+- <Flag name="tracing-process-name" /> tags spans so you can tell several nodes apart.
+
+## Pitfalls
+
+- **`--log.vmodule` has no effect.** You're using a format other than `text`.
+- **No metrics from the beacon node.** Another process holds port 8080; look for `Port already in use` in the logs.
+- **Disk fills with logs.** `--log-file` doesn't rotate. Use logrotate, or rely on journald.
+- **Tracing shows nothing.** The default endpoint path doesn't match your collector; set `--tracing-endpoint` to its OTLP/HTTP URL.

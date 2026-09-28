@@ -1,0 +1,153 @@
+---
+title: How flags work
+description: How to pass Prysm flags on the command line or in a YAML config file, how to pick a network, where defaults come from, and how to check what a running node uses.
+---
+
+import { Aside, LinkCard, CardGrid } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+You configure the Prysm beacon node, validator client and prysmctl only with command-line flags, optionally loaded from a YAML file. There are no environment variables and no other config formats. This page explains the rules that apply to every flag. The task guides below explain what the important flags do, and the [generated reference](/reference/cli/beacon-chain/) lists every flag with its type and default.
+
+## Pass flags on the command line
+
+Put flags after the binary name. With the launcher script, put them after the component name:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --datadir=$HOME/ethereum/consensus/beacon \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+Flags that take a value accept both `--name=value` and `--name value`. Prefer `=`: it is unambiguous, and it's the only form that works for booleans.
+
+### Boolean flags
+
+A boolean flag is turned on by being present: `--hoodi`, `--supernode`. To turn one off explicitly, write `--name=false`.
+
+<Aside type="caution">
+`--name false` (with a space) doesn't work for booleans. Prysm reads `false` as a stray argument and stops with `unrecognized argument: false`.
+</Aside>
+
+### List flags
+
+Flags of type *string list* or *int list* in the reference, such as <Flag name="peer" />, <Flag name="bootstrap-node" /> and <Flag name="monitor-indices" />, accept several values. Repeat the flag, or separate the values with commas:
+
+```bash
+--peer=/ip4/10.0.0.5/tcp/13000/p2p/<PEER_ID_1> --peer=/ip4/10.0.0.6/tcp/13000/p2p/<PEER_ID_2>
+--monitor-indices=1234,5678
+```
+
+A few string flags also take a comma-separated list even though they aren't list flags: <Flag name="http-cors-domain" /> and <Flag name="execution-headers" />. Don't put spaces after the commas.
+
+### Durations
+
+Duration flags such as <Flag name="api-timeout" /> and <Flag name="builder-header-timeout" /> take Go duration strings with a unit: `600ms`, `30s`, `2m`. A few older timeout flags take a plain number of seconds instead, and say so in their name (for example <Flag name="engine-endpoint-timeout-seconds" />).
+
+### Environment variables
+
+Prysm doesn't read any flag from environment variables. If you want to keep settings out of a long command line, use a config file. In Docker, pass flags as the container's command arguments.
+
+## Use a config file
+
+<Flag name="config-file" /> loads flag values from a YAML file. Keys are flag names without the leading dashes. You can combine a file with command-line flags, and **a flag on the command line always wins over the same key in the file.** That makes it easy to keep one shared base file and override a value per machine.
+
+```yaml title="/var/lib/ethereum/beacon/beacon.yaml"
+hoodi: true
+datadir: /var/lib/ethereum/beacon
+execution-endpoint: http://localhost:8551
+jwt-secret: /var/lib/ethereum/jwt.hex
+checkpoint-sync-url: https://hoodi.beaconstate.ethstaker.cc
+suggested-fee-recipient: '0x0000000000000000000000000000000000000000'
+p2p-max-peers: 70
+api-timeout: 30s
+peer:
+  - /ip4/10.0.0.5/tcp/13000/p2p/<PEER_ID_1>
+  - /ip4/10.0.0.6/tcp/13000/p2p/<PEER_ID_2>
+```
+
+```bash
+beacon-chain --config-file=/var/lib/ethereum/beacon/beacon.yaml --p2p-max-peers=100
+```
+
+Here the node runs with 100 peers, because the command-line value overrides the file. Replace `<PEER_ID_1>` and `<PEER_ID_2>` with real peer IDs, or drop the `peer` key.
+
+Rules for the file, all enforced by the YAML loader Prysm uses (urfave/cli `altsrc`):
+
+- **Types must match.** Booleans are YAML booleans (`true`, not `"true"`), numbers are numbers, and durations are strings such as `30s`. A mismatch stops the node with `Mismatched type for flag '<name>'`.
+- **List flags must be YAML lists.** `peer: a,b` is a type error; write one item per line as above.
+- **Quote hex addresses.** Write `'0x…'` so YAML keeps it as a string.
+- **Aliases work as keys**, but use the main flag name so the file matches the reference.
+- **Unknown keys are ignored silently.** A typo such as `p2p-max-peer: 100` has no effect and no warning, so check the startup logs after editing the file.
+- <Flag name="log.vmodule" /> can be written either as `log.vmodule:` or nested under `log:` as `vmodule:`.
+
+The old documentation said the YAML file overrides command-line flags. It's the other way round: Prysm only applies a value from the file when the flag wasn't set on the command line.
+
+## Choose a network
+
+Pick the network with one network flag. Use the same one on the beacon node and the validator client.
+
+| Flag | Network | Notes |
+| --- | --- | --- |
+| <Flag name="mainnet" /> | Ethereum mainnet | The default; you can omit it. The mainnet genesis state is built into Prysm. |
+| <Flag name="hoodi" /> | Hoodi testnet | The public testnet for staking practice. Use it for every example in these docs. |
+| <Flag name="sepolia" /> | Sepolia testnet | Permissioned validator set; for application testing. |
+| <Flag name="holesky" /> | Holesky testnet | Replaced by Hoodi. Use `--hoodi` for new setups. |
+
+A network flag loads that network's chain config, bootnodes, deposit contract and chain ID. The node confirms the choice at startup with a line such as `Running on the Hoodi Beacon Chain Testnet` or `Running on Ethereum Mainnet`. Passing two network flags stops the node with `cannot use more than one network flag at the same time`.
+
+Only the mainnet genesis state ships with Prysm. On a testnet the node also needs a genesis state; with <Flag name="checkpoint-sync-url" /> it downloads it from the same URL, so `--hoodi --checkpoint-sync-url=…` is all you need. See [Sync and storage](/flags/sync-and-storage/#genesis-sync).
+
+Keep one data directory per network. Prysm refuses to open a database whose stored deposit contract differs from the network's, but mainnet and Hoodi share the same deposit contract address, so that check doesn't catch a mix-up between those two.
+
+### Custom networks and devnets
+
+For a devnet, pass the network's consensus `config.yaml` with <Flag name="chain-config-file" /> instead of a network flag, plus <Flag name="genesis-state" /> and <Flag name="bootstrap-node" />. Keys missing from the file fall back to mainnet values. Built-in bootnodes are cleared. Flags you pass explicitly, such as <Flag name="chain-id" /> or <Flag name="contract-deployment-block" />, override the file. Combining `--chain-config-file` with a network flag (even `--mainnet`) fails with `chain-config-file cannot be passed concurrently with network flag`.
+
+<Flag name="minimal-config" /> and <Flag name="e2e-config" /> exist for Prysm's own tests. They have no use on a public network.
+
+## Accept the terms of use
+
+On first start the beacon node asks you to type `accept`. In systemd, Docker or any other non-interactive environment there is no terminal to answer, so pass <Flag name="accept-terms-of-use" />. Once accepted, Prysm writes an empty `tosaccepted` file into the data directory and doesn't ask again for that directory.
+
+## Where defaults come from
+
+The generated reference shows each flag's built-in default, with three caveats:
+
+- **Network flags change some defaults.** The reference shows mainnet values for <Flag name="bootstrap-node" />, <Flag name="deposit-contract" /> and <Flag name="contract-deployment-block" />. `--hoodi` and `--sepolia` replace them with their own values, so you don't set these flags on public networks.
+- **Paths depend on the operating system.** The reference was generated on macOS. See the table below.
+- **`0` sometimes means "not set".** For example, <Flag name="engine-endpoint-timeout-seconds" /> falls back to 8 seconds and <Flag name="rpc-max-page-size" /> to 250 when you don't set them. <Flag name="api-timeout" /> shows `10s`, but the beacon node only applies a timeout when you set the flag. The notes on the reference page point these out.
+
+| Platform | Default beacon node <Flag name="datadir" /> |
+| --- | --- |
+| Linux | `~/.eth2` |
+| macOS | `~/Library/Eth2` |
+| Windows | `%LOCALAPPDATA%\Eth2` |
+
+For services, set `--datadir` explicitly (these docs use `/var/lib/ethereum/beacon`) rather than relying on the home directory of the service user.
+
+## Check which flags a node is running
+
+Prysm doesn't print its full configuration at startup. To see what a node is actually using:
+
+- **The command line.** `ps -o args= -C beacon-chain` on Linux shows the flags of a running process; `systemctl cat <SERVICE>` or `docker inspect <CONTAINER>` show what the service passes. Remember to read the config file too.
+- **Startup logs.** Look for `Prysm Beacon Chain started` (with the version), the `Running on …` network line, and one `Enabled feature flag` or `Disabled feature flag` warning per [feature flag](/flags/feature-flags/) you set. Several flags log their own confirmation, such as `Default fee recipient is set to …` and `Finished reading JWT secret from …`.
+- **The Beacon API.** `curl -s http://127.0.0.1:3500/eth/v1/config/spec` returns the chain config the node is running with, including values from `--chain-config-file` and overrides such as `--chain-id`. `curl -s http://127.0.0.1:3500/eth/v1/node/version` returns the version.
+- **`--help`.** `beacon-chain --help` (or `./prysm.sh beacon-chain --help`) lists the flags your installed version supports, which is the authoritative list if it differs from these docs.
+
+## Flag guides by task
+
+<CardGrid>
+	<LinkCard title="Networking and peers" description="Ports, NAT, peer counts, bootnodes, trusted peers and subnets." href="/flags/networking/" />
+	<LinkCard title="Sync and storage" description="Checkpoint sync, backfill, blobs, supernodes, pruning and archive nodes." href="/flags/sync-and-storage/" />
+	<LinkCard title="Execution client connection" description="Engine API endpoint, JWT, headers, timeouts and chain IDs." href="/flags/execution/" />
+	<LinkCard title="APIs" description="Beacon API and gRPC hosts, ports, CORS, TLS and limits." href="/flags/apis/" />
+	<LinkCard title="Block building and MEV" description="MEV-Boost, circuit breakers, bid thresholds, fee recipient and graffiti." href="/flags/block-building/" />
+	<LinkCard title="Logging, metrics and debugging" description="Verbosity, log formats, Prometheus, pprof and tracing." href="/flags/logging-and-metrics/" />
+	<LinkCard title="Feature flags" description="Experimental and opt-out toggles, and how they change between releases." href="/flags/feature-flags/" />
+	<LinkCard title="Validator client" description="Flags for the validator client." href="/flags/validator/" />
+</CardGrid>
+
+The full lists are in the reference: [beacon-chain](/reference/cli/beacon-chain/), [validator](/reference/cli/validator/) and [prysmctl](/reference/cli/prysmctl/).

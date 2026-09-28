@@ -1,0 +1,56 @@
+---
+title: Choose a topology
+description: Compare the four supported ways to arrange the execution client, Prysm beacon node, validator clients and remote signer, and pick the one that fits.
+---
+
+import { LinkCard, CardGrid } from '@site/src/components/ui';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+A topology is how you arrange the processes of a node: the execution client, the Prysm beacon node, and, if you stake, one or more validator clients and possibly a remote signer. Most people need the first one. The others solve a specific problem.
+
+## At a glance
+
+| Topology | Processes | Pick it when | Main risk |
+| --- | --- | --- | --- |
+| [Node and validator on one machine](/setup/topologies/single-machine/) | EL + beacon node + one validator client | You stake from a home or single server setup. The default. | One machine is a single point of failure. |
+| [Beacon node only](/setup/topologies/beacon-node-only/) | EL + beacon node | You need chain data or a Beacon API for apps, not staking. | Exposing the API carelessly. |
+| [Several validator clients, one beacon node](/setup/topologies/multiple-validator-clients/) | EL + beacon node + two or more validator clients | Separate key sets must stay apart: different owners, fee recipients or operational policies. | Loading the same key twice gets you slashed. |
+| [Validator with a remote signer](/setup/topologies/remote-signer/) | EL + beacon node + validator client + Web3Signer | Keys must live outside the validator client, for example on a hardened host or behind an HSM. | More moving parts; the signer's slashing database is critical. |
+
+These combine. A validator client can use a remote signer while sharing a beacon node with other validator clients, and a staking node's beacon node can also serve read-only API traffic.
+
+## Node and validator on one machine
+
+<TopologyDiagram variant="single" />
+
+Everything talks over localhost, so there is nothing to expose except the peer-to-peer ports. This is what the [Quickstart](/get-started/quickstart/) builds.
+
+## Beacon node only
+
+<TopologyDiagram variant="beacon-only" />
+
+A beacon node with no validators attached, used as a data source or API backend. Put a reverse proxy in front of the Beacon API rather than binding Prysm to a public interface.
+
+## Several validator clients, one beacon node
+
+<TopologyDiagram variant="multi-vc" />
+
+Each validator client has its own keys, wallet, data directory and ports. The beacon node serves them all. The rule that makes it safe: every key is loaded in exactly one validator client.
+
+## Validator with a remote signer
+
+<TopologyDiagram variant="remote-signer" />
+
+The validator client decides *what* to sign; [Web3Signer](https://docs.web3signer.consensys.io/) holds the keys and does the signing. Web3Signer keeps its own slashing protection database, in addition to the validator client's.
+
+## What Prysm doesn't do
+
+- **No execution client fallback.** A beacon node connects to exactly one EL. See [Connect an execution client](/setup/connect-execution-client/).
+- **No shared keys across validator clients.** Running the same key in two places for redundancy is how validators get slashed. Plan for fast recovery instead. See [Avoid slashing](/security/avoid-slashing/).
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Node and validator on one machine" description="The complete default setup." href="/setup/topologies/single-machine/" />
+	<LinkCard title="Connect an execution client" description="Engine API, JWT secret and common errors." href="/setup/connect-execution-client/" />
+</CardGrid>

@@ -1,0 +1,471 @@
+/*
+ * Prysm docs theme for Docusaurus (Infima).
+ * Brand: the Prysm logo's blues, #2BA1F0 (light facets), #1D86CC and
+ * #166599 (shaded facets). Grounds are tinted toward the same hue rather than
+ * neutral grey so the brand carries through every surface.
+ *
+ * Components use the `--site-*` tokens below; they map onto both color modes.
+ */
+@import '@fontsource-variable/bricolage-grotesque';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+:root {
+	--site-font: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+	--site-font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+	--prysm-display: 'Bricolage Grotesque Variable', 'IBM Plex Sans', ui-sans-serif, sans-serif;
+
+	/* Brand tokens (shared by both modes). */
+	--prysm-cyan: #2ba1f0;
+	--prysm-teal: #1d86cc;
+	--prysm-deep: #166599;
+	--prysm-night: #04141f;
+	--prysm-night-2: #082131;
+	--prysm-violet: #7c6cf0;
+	--prysm-amber: #f5b94a;
+	--prysm-mint: #45d99b;
+
+	/* Light mode tokens. */
+	--site-color-accent-low: #cfe6f5;
+	--site-color-accent: #166599;
+	--site-color-accent-high: #032840;
+	--site-color-text-accent: #166599;
+	--site-color-white: #0a1b26;
+	--site-color-gray-1: #142b3a;
+	--site-color-gray-2: #294151;
+	--site-color-gray-3: #4d6372;
+	--site-color-gray-4: #7f909c;
+	--site-color-gray-5: #bfcbd3;
+	--site-color-gray-6: #e6edf1;
+	--site-color-black: #fbfcfd;
+	--site-color-bg: #fbfcfd;
+	--site-color-bg-nav: #f2f6f8;
+	--site-color-hairline: #d5dee4;
+	--site-color-hairline-light: #e3eaee;
+	--site-color-red: #c9302c;
+	--site-nav-height: var(--ifm-navbar-height);
+
+	/* Infima. */
+	--ifm-color-primary: #166599;
+	--ifm-color-primary-dark: #145b8a;
+	--ifm-color-primary-darker: #135682;
+	--ifm-color-primary-darkest: #0f476b;
+	--ifm-color-primary-light: #1a78b6;
+	--ifm-color-primary-lighter: #1c82c5;
+	--ifm-color-primary-lightest: #329ce2;
+	--ifm-background-color: var(--site-color-bg);
+	--ifm-background-surface-color: var(--site-color-bg-nav);
+	--ifm-font-color-base: var(--site-color-gray-1);
+	--ifm-heading-color: var(--site-color-white);
+	--ifm-font-family-base: var(--site-font);
+	--ifm-font-family-monospace: var(--site-font-mono);
+	--ifm-heading-font-family: var(--prysm-display);
+	--ifm-heading-font-weight: 650;
+	--ifm-line-height-base: 1.7;
+	--ifm-toc-border-color: var(--site-color-hairline);
+	--ifm-color-emphasis-300: var(--site-color-hairline);
+	--ifm-hr-border-color: var(--site-color-hairline);
+	--ifm-code-font-size: 88%;
+	--ifm-code-border-radius: 0.3rem;
+	--ifm-global-radius: 0.6rem;
+	--ifm-navbar-background-color: var(--site-color-bg-nav);
+	--ifm-footer-background-color: var(--prysm-night);
+	--ifm-menu-color: var(--site-color-gray-2);
+	--ifm-menu-color-background-active: var(--site-color-accent-low);
+	--ifm-menu-color-active: var(--site-color-accent-high);
+	--docusaurus-highlighted-code-line-bg: rgba(0, 70, 116, 0.12);
+}
+
+[data-theme='dark'] {
+	color-scheme: dark;
+	--site-color-accent-low: #06253a;
+	--site-color-accent: #2ba1f0;
+	--site-color-accent-high: #a6d7f7;
+	--site-color-text-accent: #5faee3;
+	--site-color-white: #ffffff;
+	--site-color-gray-1: #e4ebf0;
+	--site-color-gray-2: #c0cbd3;
+	--site-color-gray-3: #8a9ca8;
+	--site-color-gray-4: #586a76;
+	--site-color-gray-5: #2c3d49;
+	--site-color-gray-6: #13232e;
+	--site-color-black: #0a1720;
+	--site-color-bg: #0a1720;
+	--site-color-bg-nav: #10202b;
+	--site-color-hairline: #1d3240;
+	--site-color-hairline-light: #172c3a;
+	--site-color-red: #ff7a75;
+
+	--ifm-color-primary: #2ba1f0;
+	--ifm-color-primary-dark: #1195ee;
+	--ifm-color-primary-darker: #108de1;
+	--ifm-color-primary-darkest: #0d74b9;
+	--ifm-color-primary-light: #40aaf2;
+	--ifm-color-primary-lighter: #4baff2;
+	--ifm-color-primary-lightest: #6bbdf4;
+	--docusaurus-highlighted-code-line-bg: rgba(43, 161, 240, 0.16);
+}
+
+body {
+	background: var(--site-color-bg);
+}
+
+/* ——— Typography ——— */
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+h1 {
+	font-family: var(--prysm-display);
+	letter-spacing: -0.015em;
+}
+.markdown h1:first-child,
+article header h1 {
+	font-size: clamp(2rem, 1.4rem + 2vw, 2.75rem);
+	letter-spacing: -0.025em;
+	font-weight: 700;
+}
+.markdown h2 {
+	font-size: clamp(1.45rem, 1.3rem + 0.6vw, 1.8rem);
+	margin-top: 2.5rem;
+}
+.markdown h3 {
+	font-size: 1.3rem;
+}
+.markdown h4 {
+	font-size: 1.08rem;
+}
+.markdown {
+	--ifm-h1-vertical-rhythm-bottom: 1;
+}
+.markdown p,
+.markdown li {
+	max-width: 46rem;
+}
+
+/* Inline code: faint teal wash so commands and flags stand out in prose. */
+.markdown :not(pre) > code {
+	background: color-mix(in srgb, var(--site-color-accent) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--site-color-accent) 22%, transparent);
+	padding: 0.1em 0.35em;
+	vertical-align: baseline;
+}
+.prysm-flag {
+	text-decoration: none !important;
+}
+.prysm-flag:hover code {
+	border-color: var(--site-color-accent);
+}
+
+/* Tables scroll horizontally on narrow screens. */
+.markdown table {
+	display: block;
+	overflow-x: auto;
+	font-size: 0.92em;
+}
+.markdown th {
+	background: var(--site-color-gray-6);
+}
+.markdown table tr:nth-child(2n) {
+	background: transparent;
+}
+
+/* ——— Navbar and sidebar ——— */
+.navbar__title {
+	font-family: var(--prysm-display);
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	font-size: 1.3rem;
+}
+.navbar__logo {
+	height: 1.9rem;
+}
+.navbar {
+	border-bottom: 1px solid var(--site-color-hairline);
+	box-shadow: none;
+}
+.menu__list-item-collapsible > .menu__link--sublist,
+.theme-doc-sidebar-item-category-level-1 > .menu__list-item-collapsible > .menu__link {
+	font-family: var(--prysm-display);
+	font-weight: 650;
+	color: var(--site-color-white);
+}
+.menu__link {
+	font-size: 0.92rem;
+}
+
+/* Keyboard focus is always visible. */
+:focus-visible {
+	outline: 2px solid var(--site-color-accent);
+	outline-offset: 2px;
+}
+
+/* ——— Admonitions in brand hues ——— */
+.theme-admonition {
+	border-radius: 0.6rem;
+	border-left-width: 3px;
+}
+.alert--success {
+	--ifm-alert-background-color: color-mix(in srgb, #2fb584 14%, var(--site-color-bg));
+	--ifm-alert-border-color: #2fb584;
+	--ifm-alert-foreground-color: var(--site-color-gray-1);
+}
+.alert--info,
+.alert--secondary {
+	--ifm-alert-background-color: color-mix(in srgb, var(--site-color-accent) 12%, var(--site-color-bg));
+	--ifm-alert-border-color: var(--site-color-accent);
+	--ifm-alert-foreground-color: var(--site-color-gray-1);
+}
+.alert--warning {
+	--ifm-alert-background-color: color-mix(in srgb, #d99a2b 14%, var(--site-color-bg));
+	--ifm-alert-border-color: #d99a2b;
+	--ifm-alert-foreground-color: var(--site-color-gray-1);
+}
+.alert--danger {
+	--ifm-alert-background-color: color-mix(in srgb, #e5484d 13%, var(--site-color-bg));
+	--ifm-alert-border-color: #e5484d;
+	--ifm-alert-foreground-color: var(--site-color-gray-1);
+}
+
+/* ——— Page components (src/components/ui.tsx) ——— */
+.ui-steps > ol {
+	list-style: none;
+	counter-reset: ui-step;
+	padding-left: 0;
+}
+.ui-steps > ol > li {
+	counter-increment: ui-step;
+	position: relative;
+	padding: 0 0 1.25rem 2.75rem;
+	margin: 0;
+	border-left: 1px solid var(--site-color-hairline);
+	margin-left: 1rem;
+	max-width: none;
+}
+/* A step whose only content is a hidden <When> block (SetupPicker) drops out of the numbering. */
+.ui-steps > ol > li:has(> [hidden]:only-child) {
+	display: none;
+}
+.ui-steps > ol > li:last-child {
+	border-left-color: transparent;
+	padding-bottom: 0.25rem;
+}
+.ui-steps > ol > li::before {
+	content: counter(ui-step);
+	position: absolute;
+	left: -1rem;
+	top: -0.1rem;
+	width: 2rem;
+	height: 2rem;
+	border-radius: 50%;
+	display: grid;
+	place-items: center;
+	font-family: var(--prysm-display);
+	font-weight: 700;
+	font-size: 0.95rem;
+	background: var(--site-color-bg);
+	border: 1.5px solid var(--site-color-accent);
+	color: var(--site-color-accent-high);
+}
+.ui-steps > ol > li > :first-child {
+	margin-top: 0;
+}
+
+.ui-card-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+	gap: 1rem;
+	margin: 1.5rem 0;
+}
+.ui-link-card {
+	position: relative;
+	display: grid;
+	gap: 0.25rem;
+	padding: 1rem 3rem 1rem 1.1rem;
+	border: 1px solid var(--site-color-gray-5);
+	border-radius: 0.75rem;
+	color: inherit;
+	text-decoration: none !important;
+	transition: border-color 0.15s, background-color 0.15s;
+}
+.ui-link-card:hover {
+	border-color: var(--site-color-accent);
+	background: color-mix(in srgb, var(--site-color-accent) 5%, transparent);
+}
+.ui-link-card-title {
+	font-family: var(--prysm-display);
+	font-weight: 650;
+	font-size: 1.08rem;
+	color: var(--site-color-white);
+}
+.ui-link-card-desc {
+	font-size: 0.9rem;
+	color: var(--site-color-gray-3);
+	line-height: 1.5;
+}
+.ui-link-card-arrow {
+	position: absolute;
+	right: 1rem;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--site-color-gray-3);
+}
+.ui-link-card:hover .ui-link-card-arrow {
+	color: var(--site-color-accent);
+}
+.ui-card {
+	border: 1px solid var(--site-color-gray-5);
+	border-radius: 0.75rem;
+	padding: 1rem 1.1rem;
+}
+.ui-card-title {
+	font-family: var(--prysm-display);
+	font-weight: 650;
+	margin: 0 0 0.4rem;
+}
+.ui-badge {
+	display: inline-block;
+	font-size: 0.72rem;
+	font-weight: 600;
+	padding: 0.05rem 0.5rem;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--site-color-accent) 18%, transparent);
+	color: var(--site-color-white);
+	vertical-align: middle;
+}
+.ui-badge-tip,
+.ui-badge-success {
+	background: color-mix(in srgb, var(--prysm-mint) 22%, transparent);
+}
+.ui-badge-caution {
+	background: color-mix(in srgb, var(--prysm-amber) 24%, transparent);
+}
+.ui-badge-danger {
+	background: color-mix(in srgb, #e5484d 22%, transparent);
+}
+.ui-file-tree {
+	font-family: var(--site-font-mono);
+	font-size: 0.86rem;
+	background: var(--site-color-bg-nav);
+	border: 1px solid var(--site-color-hairline);
+	border-radius: 0.6rem;
+	padding: 0.75rem 1rem;
+	margin: 1rem 0;
+}
+.ui-file-tree ul {
+	list-style: none;
+	padding-left: 1.1rem;
+	margin: 0;
+	border-left: 1px solid var(--site-color-hairline);
+}
+.ui-file-tree > ul {
+	padding-left: 0;
+	border-left: 0;
+}
+.ui-file-tree li {
+	margin: 0.1rem 0;
+	max-width: none;
+}
+.ui-file-tree li::marker {
+	content: '';
+}
+
+
+/* ——— Footer ——— */
+.footer--dark {
+	--ifm-footer-background-color: var(--prysm-night);
+	border-top: 1px solid #0f2d41;
+}
+
+/* Admonition titles in sentence case, like the rest of the site. */
+.theme-admonition [class*='admonitionHeading'] {
+	text-transform: none;
+	font-family: var(--prysm-display);
+	font-size: 1rem;
+	font-weight: 650;
+	letter-spacing: 0;
+}
+
+/* Offchain wordmark in the navbar (see docusaurus.config.ts). */
+.navbar-offchain {
+	display: flex;
+	align-items: center;
+	opacity: 0.8;
+}
+.navbar-offchain:hover {
+	opacity: 1;
+}
+.navbar-offchain-logo {
+	display: block;
+	height: 1.25rem;
+	width: auto;
+}
+
+/* GitHub and Discord links in the navbar: brand icon plus label (see docusaurus.config.ts). */
+.navbar-icon-link {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.navbar-icon {
+	display: block;
+	width: 1.1rem;
+	height: 1.1rem;
+	flex: none;
+}
+
+/*
+ * Keep the desktop navbar on one line. Docusaurus only switches to the mobile
+ * menu below 997px, and between that and wide screens the links, logos and
+ * search don't fit at full size, so the navbar gets more compact in steps.
+ */
+@media (min-width: 997px) {
+	.navbar__item,
+	.navbar__link {
+		white-space: nowrap;
+	}
+}
+@media (min-width: 997px) and (max-width: 1440px) {
+	/* GitHub and Discord as icons only; their names stay as tooltips and labels. */
+	.navbar-icon-link span {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+	}
+	.navbar__item {
+		padding-left: 0.55rem;
+		padding-right: 0.55rem;
+	}
+}
+@media (min-width: 997px) and (max-width: 1250px) {
+	/* Logo mark without the "Prysm" wordmark, and search as an icon until focused. */
+	.navbar__title {
+		display: none;
+	}
+	.navbar__search-input:not(:focus) {
+		width: 2.25rem;
+		padding-right: 0;
+	}
+	.navbar__search kbd,
+	.navbar__search [class*='searchHint'] {
+		display: none;
+	}
+	.navbar-offchain-logo {
+		height: 1rem;
+	}
+}
+@media (min-width: 997px) and (max-width: 1120px) {
+	.navbar__item {
+		padding-left: 0.4rem;
+		padding-right: 0.4rem;
+	}
+	.navbar__link {
+		font-size: 0.9rem;
+	}
+}
