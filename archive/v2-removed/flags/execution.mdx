@@ -1,0 +1,91 @@
+---
+title: Execution client connection
+description: Beacon node flags for the Engine API connection to your execution client - endpoint, JWT secret, IPC, extra HTTP headers, timeouts, deposit contract settings and chain IDs.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The beacon node drives your execution client (Geth, Nethermind, Besu, Erigon, Reth, Ethrex) over the Engine API. Two flags are required for every node: <Flag name="execution-endpoint" /> and <Flag name="jwt-secret" />. The others are for proxies, hosted endpoints, slow machines and custom networks. For client-specific setup, see [Connect an execution client](/setup/connect-execution-client/).
+
+## Endpoint and JWT
+
+| Flag | Default | What to set |
+| --- | --- | --- |
+| <Flag name="execution-endpoint" /> | `http://localhost:8551` | The execution client's authenticated Engine API (auth RPC) port |
+| <Flag name="jwt-secret" /> | none | Path to the same JWT secret file the execution client uses |
+| <Flag name="jwt-id" /> | none | Optional `id` claim, to tell several consensus clients apart in the execution client's logs |
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  ...
+```
+
+The JWT file holds 32 bytes as hex, with or without `0x`. On success the node logs `Finished reading JWT secret from <path>`. An empty, unreadable or wrong-length file stops the node at startup. Generate one with the beacon node itself:
+
+```bash
+./prysm.sh beacon-chain generate-auth-secret --output-file=$HOME/ethereum/jwt.hex
+```
+
+It writes a `0x`-prefixed secret with `0600` permissions and logs `Successfully wrote JSON-RPC authentication secret to file …`. Without `--output-file` it writes `jwt.hex` in the current directory. It overwrites an existing file without asking, so run it once and point both clients at the result.
+
+**IPC.** `--execution-endpoint` also accepts an IPC socket path, as a plain path or with `ipc://`, for example `--execution-endpoint=$HOME/ethereum/execution/geth.ipc`. IPC needs no JWT, and only works when both clients run on the same host with access to the socket file.
+
+**Reconnects.** If the execution client restarts, Prysm keeps retrying and logs `Connected to new endpoint` once it's back. At startup Prysm checks the execution client's chain ID and stops with `wanted chain ID …, got …` if it doesn't match the network flag; a `401 Unauthorized` error means the JWT secrets differ.
+
+<Aside type="caution">
+Keep the Engine API on `localhost` or a private network. The JWT secret is the only protection on it, and the execution client should never expose port 8551 to the internet.
+</Aside>
+
+## Custom HTTP headers
+
+Hosted or proxied endpoints sometimes need extra headers, such as an API key. Add them with <Flag name="execution-headers" />, as comma-separated `key=value` pairs:
+
+```bash
+--execution-headers=X-Api-Key=<API_KEY>,X-Node=beacon-1
+```
+
+Values can contain `=` but not commas. A pair without `=` is skipped with the warning `Incorrect HTTP header flag format`.
+
+You can't send your own `Authorization` header to the Engine API. With `--jwt-secret` set, Prysm puts the JWT in the `Authorization` header of every request, replacing any value from `--execution-headers`. The same goes for the legacy form that appends credentials to the URL after a comma (`--execution-endpoint=<URL>,Basic <USER:PASSWORD>`): the JWT replaces it. If your proxy needs its own credentials, have it read them from another header.
+
+## Timeouts and limits
+
+<Flag name="engine-endpoint-timeout-seconds" /> sets the timeout for `engine_newPayload` and `engine_forkchoiceUpdated`. When you don't set it, Prysm uses 8 seconds, as the Engine API spec recommends; the reference shows `0` only because that means "not set". Raise it (for example to `12`) only if a slow execution client times out importing blocks, and treat that as a sign the machine is undersized: a block that takes that long to import is likely to be late for attestations.
+
+<Aside type="caution">
+Explicitly setting `--engine-endpoint-timeout-seconds=0` means a zero timeout, and every call fails.
+</Aside>
+
+<Flag name="eth1-header-req-limit" /> caps the block range per request when reading deposit contract logs. Lower it if your provider rejects large `eth_getLogs` queries. Since Electra, deposits arrive as execution requests (EIP-6110); once the chain has fully switched over, Prysm stops reading deposit logs and this flag no longer matters.
+
+## Deposit contract and chain IDs
+
+Network flags (`--hoodi`, `--mainnet`, `--sepolia`) set all of these. You only set them for a custom network, usually together with <Flag name="chain-config-file" />; flags you pass override the file.
+
+| Flag | Mainnet value | What it's for |
+| --- | --- | --- |
+| <Flag name="chain-id" /> | 1 (Hoodi: 560048) | Compared with the execution client's `eth_chainId` at startup; returned by `/eth/v1/config/deposit_contract` |
+| <Flag name="network-id" /> | 1 (Hoodi: 560048) | Only reported in `/eth/v1/config/spec`; no effect on behavior |
+| <Flag name="deposit-contract" /> | `0x00000000219ab540356cBB839Cbe05303d7705Fa` | Deposit contract address; stored in the database at first start |
+| <Flag name="contract-deployment-block" /> | 11184524 (Hoodi: 0) | Where Prysm starts reading deposit logs |
+
+<Flag name="disable-staking-contract-check" /> lets a proposer build `eth1_data` without a deposit block lookup on devnets that have no deposit contract. It has no use on public networks.
+
+## Merge overrides
+
+<Flag name="terminal-total-difficulty-override" />, <Flag name="terminal-block-hash-override" /> and <Flag name="terminal-block-hash-epoch-override" /> override the Merge transition parameters. Mainnet and all public testnets are past the Merge, so these only matter for a devnet that starts before it. Prysm logs a warning when any of them is set.
+
+<Aside type="caution">
+A wrong Merge override on a live network makes your node follow a different chain than everyone else, so your validators miss their duties.
+</Aside>
+
+## Pitfalls
+
+- **`401 Unauthorized` from the execution client.** The two clients read different JWT files, or one of them was regenerated. Point both at one file and restart both.
+- **`wanted chain ID …, got …`.** The execution client runs on another network than the beacon node. Check both network flags.
+- **Beacon node logs connection errors at startup.** The execution client isn't up yet or listens on another port or interface. Prysm keeps retrying; check the execution client's auth RPC settings.
+- **Using the public RPC port (8545) by mistake.** The Engine API is the authenticated port, 8551 by default in most clients.

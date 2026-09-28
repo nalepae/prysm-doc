@@ -1,0 +1,248 @@
+---
+title: "Validator client"
+description: "The validator client flags you actually change, grouped by task: beacon node connections and failover, wallet and keys, fee recipient, graffiti, slashing protection, APIs, metrics and remote signing."
+---
+
+import Flag from '@site/src/components/Flag';
+
+The validator client needs very little configuration: a network, a way to reach a beacon node, keys, and a fee recipient. Everything else has a sensible default. This page walks through the flags by task and explains the behavior behind them. For every flag with its default, see the [validator CLI reference](/reference/cli/validator/).
+
+A typical service invocation looks like this (swap `--hoodi` for `--mainnet`):
+
+```bash
+/usr/local/bin/validator \
+  --hoodi \
+  --datadir=/var/lib/ethereum/validator \
+  --wallet-dir=/var/lib/ethereum/validator/wallet \
+  --wallet-password-file=/var/lib/ethereum/validator/wallet-password.txt \
+  --beacon-rest-api-provider=http://127.0.0.1:3500 \
+  --suggested-fee-recipient=<YOUR_ETH_ADDRESS> \
+  --accept-terms-of-use
+```
+
+Replace `<YOUR_ETH_ADDRESS>` with an execution-layer address you control.
+
+## Connect to beacon nodes
+
+### gRPC or REST
+
+The validator client talks to the beacon node over one of two APIs:
+
+| | gRPC (default) | REST |
+| --- | --- | --- |
+| Flag | <Flag name="beacon-rpc-provider" bin="validator" /> | <Flag name="beacon-rest-api-provider" bin="validator" /> |
+| Format | `host:port`, default `127.0.0.1:4000` | URL, default `http://127.0.0.1:3500` |
+| Beacon node side | <Flag name="rpc-host" /> / <Flag name="rpc-port" /> | <Flag name="http-host" /> / <Flag name="http-port" /> |
+| Several nodes | Failover, one node at a time | All nodes used at once |
+| Works with other clients' beacon nodes | No (Prysm only) | Yes (standard Beacon API) |
+
+gRPC is still the default and, according to the flag's own warning, stays fully supported through v8 before it is removed in favor of REST. The REST path is marked experimental in its flag description.
+
+To use REST, set <Flag name="beacon-rest-api-provider" bin="validator" />. Setting it is enough: it switches the client to REST on its own. <Flag name="enable-beacon-rest-api" bin="validator" /> does the same while keeping the default URL, so you only need it if your beacon node listens on `http://127.0.0.1:3500`. Once REST is enabled, <Flag name="beacon-rpc-provider" bin="validator" /> is ignored for duties.
+
+If the beacon node runs on another machine, it must listen on an interface the validator can reach: <Flag name="http-host" value="0.0.0.0" /> for REST or <Flag name="rpc-host" value="0.0.0.0" /> for gRPC, with a firewall that only lets the validator host in. See [Multiple validator clients](/setup/topologies/multiple-validator-clients/) for the layout.
+
+### Multiple beacon nodes
+
+Both flags accept a comma-separated list, and the two APIs handle it very differently.
+
+**gRPC: active-passive.** The validator connects to the first node only. Once per slot it checks that the current node is reachable and synced; if not, it tries the next ones in order (wrapping around) and stays on the first healthy one. It does not switch back when an earlier node recovers.
+
+```bash
+--beacon-rpc-provider=10.0.0.1:4000,10.0.0.2:4000
+```
+
+When it fails over, the validator logs (timestamp omitted):
+
+```text
+WARN fallback: Switched to responsive beacon node current=10.0.0.2:4000 previous=10.0.0.1:4000 tried=[10.0.0.1:4000]
+```
+
+**REST: active-active.** The validator uses every node all the time:
+
+- It subscribes to the event stream of every node and merges them, so it learns about a new head from whichever node imports it first.
+- Writes (attestations, blocks, aggregates, registrations) are sent to all nodes; a write succeeds as soon as one node accepts it.
+- Time-critical reads (attestation data, sync committee roots, blocks to propose) are sent to all nodes at once, and the response that matches the newest known head wins. If no node catches up before the duty deadline, the first usable response is used, so the validator still performs the duty.
+- Other reads try the nodes in the listed order and keep the first successful answer.
+- The node counts as healthy when at least one node reports synced (`/eth/v1/node/health` returns 200).
+
+```bash
+--beacon-rest-api-provider=http://10.0.0.1:3500,http://10.0.0.2:3500
+```
+
+At startup you should see the list being picked up:
+
+```text
+INFO rest: Initialized REST connection provider count=2 endpoints=[http://10.0.0.1:3500 http://10.0.0.2:3500]
+```
+
+With two or more nodes of either kind, Prysm also turns on <Flag name="stateless" bin="validator" /> for the Gloas fork and later, because only the node that built a block can reveal its execution payload. It logs `Multiple beacon nodes configured: enabling --stateless so block production works on every node`.
+
+:::caution[All beacon nodes must be on the same network]
+Every node in the list must follow the same chain and be synced. Mixing networks, or pointing at a node you don't control, lets that node feed your validator wrong data.
+:::
+
+### TLS, headers and retries
+
+- **gRPC over TLS:** pass the beacon node's certificate with <Flag name="tls-cert" bin="validator" /> (the beacon node serves it with its own <Flag name="tls-cert" /> and <Flag name="tls-key" />). If the file can't be read, the validator logs `Could not get valid credentials` and doesn't connect at all. Without the flag, the connection is unencrypted and Prysm warns about it; that's fine on localhost.
+- **REST over TLS:** use an `https://` URL in <Flag name="beacon-rest-api-provider" bin="validator" />.
+- **Proxies that need auth headers:** <Flag name="grpc-headers" bin="validator" /> (gRPC) and <Flag name="beacon-rest-api-headers" bin="validator" /> (REST) take `key=value` pairs separated by commas. For REST, repeat a key to send several values; malformed pairs are dropped silently.
+- **gRPC retries:** <Flag name="grpc-retries" bin="validator" /> (default 5) and <Flag name="grpc-retry-delay" bin="validator" /> (default `1s`, linear backoff). REST calls use a fixed 30-second timeout.
+
+### Health checks and shutdown
+
+The validator runs a health check every slot. By default it keeps retrying forever while no beacon node is ready, logging `Failed health check, beacon node is unresponsive`. Set <Flag name="max-health-checks" bin="validator" /> to make it stop after that many consecutive failures, which is useful when a supervisor (systemd, Kubernetes) should restart or alert:
+
+```bash
+--max-health-checks=10
+```
+
+## Wallet and keys
+
+With local keys, the validator opens a Prysm wallet:
+
+- <Flag name="wallet-dir" bin="validator" /> is where the wallet lives. Default: `~/.eth2validators/prysm-wallet-v2` on Linux, `~/Library/Eth2Validators/prysm-wallet-v2` on macOS.
+- <Flag name="wallet-password-file" bin="validator" /> unlocks it without a prompt. A trailing newline is ignored. If you don't set the flag, Prysm looks for `walletpassword.txt` in the wallet directory and uses it if its permissions are `0600`.
+- New keys are picked up without a restart: the validator watches the wallet's keystore file and reloads it after <Flag name="dynamic-key-reload-debounce-interval" bin="validator" /> (default `1s`) of quiet.
+
+Create and fill the wallet with the `validator accounts import` subcommand; its flags (<Flag name="keys-dir" bin="validator" />, <Flag name="account-password-file" bin="validator" />) are covered in [Import keys](/validators/import-keys/). The other `accounts` subcommands list, back up and delete keys; each flag is annotated in the [CLI reference](/reference/cli/validator/#subcommands).
+
+If you sign with Web3Signer instead, no wallet is opened; see [Remote and distributed signing](#remote-and-distributed-signing).
+
+## Slashing protection database
+
+<Flag name="datadir" bin="validator" /> holds the validator's database, which is mostly your slashing protection history: every block and attestation each key signed. The validator refuses to sign anything that conflicts with it. Default: `~/.eth2` on Linux, `~/Library/Eth2` on macOS.
+
+:::danger[Move the database with the keys]
+If you move keys to another machine, stop the old validator, export its history (`validator slashing-protection-history export`), and import it on the new machine before starting. Running the same keys with an empty database, or on two machines at once, can get you slashed. See [Slashing protection](/validators/slashing-protection/).
+:::
+
+Related flags:
+
+- <Flag name="enable-minimal-slashing-protection" bin="validator" /> stores only what EIP-3076 needs (highest source and target epochs, highest proposal slot per key) in `<datadir>/validator-client-data/` instead of the full history in `validator.db`. Prysm keeps using an existing complete database until you convert it with `validator db convert-complete-to-minimal`, and it refuses to start if both exist.
+- <Flag name="enable-slashing-protection-history-pruning" bin="validator" /> deletes attestation records older than the weak subjectivity period at startup, which keeps `validator.db` from growing forever.
+- <Flag name="clear-db" bin="validator" /> and <Flag name="force-clear-db" bin="validator" /> delete the database. There is almost never a good reason to use them on a live validator.
+
+## Fee recipient, gas limit and MEV
+
+Every validator needs a fee recipient: the execution-layer address that receives priority fees and MEV payments when it proposes. The default is the burn address, so always set one.
+
+- <Flag name="suggested-fee-recipient" bin="validator" /> sets it for all keys.
+- <Flag name="proposer-settings-file" bin="validator" /> or <Flag name="proposer-settings-url" bin="validator" /> set it per key, together with gas limit, graffiti and builder options. See [Proposer settings file](/flags/proposer-settings/).
+- The [Keymanager API](/validators/keymanager/) can change it at runtime; the change is saved in the validator database.
+
+For MEV-Boost, <Flag name="enable-builder" bin="validator" /> makes the validator sign a builder registration (fee recipient and gas limit) for each key every epoch and send it to the beacon node, which forwards it to the relays configured with <Flag name="http-mev-relay" />. <Flag name="suggested-gas-limit" bin="validator" /> sets the gas limit in those registrations; it doesn't affect blocks your own execution client builds. Registrations are sent in batches of <Flag name="validators-registration-batch-size" bin="validator" /> (default 200). See [MEV-Boost](/validators/mev-boost/).
+
+:::note
+<Flag name="enable-builder" bin="validator" /> and <Flag name="suggested-gas-limit" bin="validator" /> configure the pre-Gloas MEV-Boost flow and stop having any effect at the Gloas fork. Builders for Gloas are configured with version 2 [proposer settings](/flags/proposer-settings/#builder-settings-from-gloas-version-2).
+:::
+
+## Graffiti
+
+<Flag name="graffiti" bin="validator" /> puts up to 32 bytes of text in your proposed blocks; prefix it with `hex:` to pass raw bytes. <Flag name="graffiti-file" bin="validator" /> takes a YAML file with `default`, `ordered`, `random` and `specific` (by validator index) entries.
+
+For each proposal, Prysm uses the first graffiti it finds in this order:
+
+1. The key's `graffiti` in proposer settings (or set through the Keymanager API).
+2. `default_config.graffiti` in proposer settings.
+3. <Flag name="graffiti" bin="validator" />.
+4. The graffiti file: `specific`, then the next `ordered` entry, then a `random` entry, then `default`.
+
+See [Graffiti](/validators/graffiti/) for the file format.
+
+## Doppelganger protection
+
+<Flag name="enable-doppelganger" bin="validator" /> makes the validator ask the beacon node, at startup, whether any of its keys were live on chain over roughly the last 2-3 epochs. If one did, another instance is probably running those keys, and the validator stops with an error containing `Duplicate instances exists in the network for validator keys`.
+
+Keys added while the validator runs (imported through the API or the wallet) are held out of duties for at least 2 epochs, until they pass the same check.
+
+It is a safety net, not a guarantee. It only catches a duplicate that is attesting at that moment, and keys whose own local history shows an attestation in the last two epochs skip the check, since the beacon node can't tell the two apart. After moving keys, still wait for the old machine to be verifiably stopped. See [Avoid slashing](/security/avoid-slashing/).
+
+## Keymanager API and web UI
+
+The validator has no API unless you ask for one, and it runs no gRPC server at all. <Flag name="rpc" bin="validator" /> starts an HTTP server on <Flag name="http-host" bin="validator" />:<Flag name="http-port" bin="validator" /> (default `127.0.0.1:7500`) that serves the standard [Keymanager API](/reference/apis/keymanager-api/) and Prysm's validator API. <Flag name="web" bin="validator" /> also serves the Prysm web UI and implies the API.
+
+Every request needs the bearer token stored in <Flag name="keymanager-token-file" bin="validator" />. The validator creates the file on first start if it doesn't exist and logs where it is:
+
+```text
+INFO rpc: Validator Client auth token for gRPC and REST authentication set at /var/lib/ethereum/validator/auth-token
+```
+
+```bash
+curl -H "Authorization: Bearer $(cat /var/lib/ethereum/validator/auth-token)" \
+  http://127.0.0.1:7500/eth/v1/keystores
+```
+
+:::caution[Set the token path when you move the wallet]
+The default token path is under the *default* wallet directory, even when you pass a different <Flag name="wallet-dir" bin="validator" />. Set <Flag name="keymanager-token-file" bin="validator" /> explicitly in service files.
+:::
+
+This API can import, delete and exit keys. Keep <Flag name="http-host" bin="validator" /> on `127.0.0.1` (Prysm warns for any other value) and use an SSH tunnel for remote access. <Flag name="http-cors-domain" bin="validator" /> only matters for browser-based tools. See [Secure the APIs](/security/apis/).
+
+To rotate the token, run `validator web generate-auth-token --keymanager-token-file=<TOKEN_FILE>`; the running validator watches the file and picks up the new token.
+
+## Metrics, logs and tracing
+
+| Task | Flags |
+| --- | --- |
+| Prometheus metrics | <Flag name="monitoring-host" bin="validator" />, <Flag name="monitoring-port" bin="validator" /> (default `127.0.0.1:8081`, the beacon node uses 8080), <Flag name="disable-monitoring" bin="validator" /> |
+| Fewer metrics with many keys | <Flag name="disable-account-metrics" bin="validator" /> drops per-key series |
+| Quieter logs with many keys | <Flag name="disable-rewards-penalties-logging" bin="validator" /> drops per-epoch performance lines |
+| Log level | <Flag name="verbosity" bin="validator" />, per package with <Flag name="log.vmodule" bin="validator" /> |
+| Log format and destination | <Flag name="log-format" bin="validator" /> (`text`, `json`, `fluentd`, `journald`), <Flag name="log-file" bin="validator" />, <Flag name="disable-log-colors" bin="validator" /> |
+| 24-hour debug log | On by default in `<datadir>/logs/validator.log`; <Flag name="disable-ephemeral-log-file" bin="validator" /> turns it off |
+| Tracing | <Flag name="enable-tracing" bin="validator" />, <Flag name="tracing-endpoint" bin="validator" />, <Flag name="trace-sample-fraction" bin="validator" />, <Flag name="tracing-process-name" bin="validator" /> |
+| Profiling | <Flag name="pprof" bin="validator" />, <Flag name="pprofaddr" bin="validator" />, <Flag name="pprofport" bin="validator" /> |
+
+See [Metrics](/operate/metrics/) and [Logs](/operate/logs/).
+
+## Remote and distributed signing
+
+- **Web3Signer:** <Flag name="validators-external-signer-url" bin="validator" /> sends every signing request to Web3Signer instead of opening a wallet. You also choose which keys to use with <Flag name="validators-external-signer-public-keys" bin="validator" /> or <Flag name="validators-external-signer-key-file" bin="validator" />. See [Remote signer flags](/flags/remote-signer/) and the [remote signer topology](/setup/topologies/remote-signer/).
+- **Distributed validators (DVT):** <Flag name="distributed" bin="validator" /> makes the validator work behind DVT middleware such as Obol Charon. It requires the REST API. See [Distributed validators](/flags/remote-signer/#distributed-validators).
+
+## Networks and configuration files
+
+- Network: <Flag name="mainnet" bin="validator" /> (default), <Flag name="hoodi" bin="validator" />, <Flag name="sepolia" bin="validator" />, <Flag name="holesky" bin="validator" />. Only one can be set, and it must match the beacon node. Custom devnets use <Flag name="chain-config-file" bin="validator" />.
+- <Flag name="config-file" bin="validator" /> reads flags from a YAML file, with flag names (no dashes) as keys. Flags on the command line win over the file.
+- <Flag name="accept-terms-of-use" bin="validator" /> skips the terms prompt; it is required the first time Prysm runs non-interactively.
+
+```yaml title="validator.yaml"
+hoodi: true
+datadir: /var/lib/ethereum/validator
+wallet-dir: /var/lib/ethereum/validator/wallet
+wallet-password-file: /var/lib/ethereum/validator/wallet-password.txt
+beacon-rest-api-provider: http://127.0.0.1:3500
+suggested-fee-recipient: "<YOUR_ETH_ADDRESS>"
+accept-terms-of-use: true
+```
+
+```bash
+/usr/local/bin/validator --config-file=/etc/prysm/validator.yaml
+```
+
+## Flags with no effect
+
+These flags are accepted but the validator client in this release doesn't read them. Don't rely on them:
+
+| Flag | Why |
+| --- | --- |
+| <Flag name="rpc-host" bin="validator" />, <Flag name="rpc-port" bin="validator" /> | The v7 validator client runs no gRPC server; nothing listens on port 7000. The HTTP API listens on <Flag name="http-host" bin="validator" /> and <Flag name="http-port" bin="validator" />. |
+| <Flag name="api-timeout" bin="validator" /> | Only the beacon node reads it. REST calls from the validator use a fixed 30-second timeout. |
+| <Flag name="disable-duties-polling" bin="validator" /> | Registered, but never passed to the validator service. |
+
+The `remote-signer-*-path` flags of `validator wallet create` are also left over from a removed wallet type.
+
+## Advanced and testing flags
+
+- <Flag name="disable-attest-timely" bin="validator" /> makes the validator always wait until the attestation deadline, instead of attesting as soon as the slot's block is processed.
+- <Flag name="disable-duties-v2" bin="validator" /> makes the gRPC client use the older duties endpoint, for beacon nodes that lack the v2 one.
+- <Flag name="grpc-max-msg-size" bin="validator" /> caps the gRPC response size.
+- <Flag name="write-wallet-password-on-web-onboarding" bin="validator" /> saves the wallet password to disk when a wallet is created in the web UI.
+- <Flag name="minimal-config" bin="validator" /> and <Flag name="e2e-config" bin="validator" /> exist for tests and devnets.
+
+## Next steps
+
+- [Proposer settings file](/flags/proposer-settings/): per-key fee recipients, gas limits and builders.
+- [Remote signer flags](/flags/remote-signer/): run with Web3Signer.
+- [Validator CLI reference](/reference/cli/validator/): every flag and subcommand.

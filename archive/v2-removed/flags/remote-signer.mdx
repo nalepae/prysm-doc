@@ -1,0 +1,161 @@
+---
+title: "Remote signer"
+description: "Flags that connect the Prysm validator client to Web3Signer: signer URL, choosing and persisting public keys, polling, the remote-keys Keymanager API, TLS, exits and distributed validators."
+---
+
+import Flag from '@site/src/components/Flag';
+
+With a remote signer, the validator client keeps doing duties but never holds private keys: it sends each signing request to [Web3Signer](https://docs.web3signer.consensys.io/) and gets a signature back. This page covers the validator client side. For why and when to use this layout, and how to run Web3Signer itself, see the [remote signer topology](/setup/topologies/remote-signer/).
+
+## Connect to Web3Signer
+
+<Flag name="validators-external-signer-url" bin="validator" /> is the base URL of Web3Signer. Setting it switches the validator client to remote signing:
+
+- No Prysm wallet is opened; <Flag name="wallet-dir" bin="validator" /> is irrelevant and <Flag name="wallet-password-file" bin="validator" /> is ignored with a warning (`No Prysm wallet required for web3signer validation` is logged at startup).
+- Signatures are requested from `<URL>/api/v1/eth2/sign/<PUBKEY>`. The genesis validators root that Web3Signer needs is taken from the beacon node once the validator connects.
+- Local keystores are not used at the same time. A validator client signs either with a local wallet or with Web3Signer.
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --beacon-rest-api-provider=http://127.0.0.1:3500 \
+  --validators-external-signer-url=http://127.0.0.1:9000 \
+  --validators-external-signer-key-file=/var/lib/ethereum/validator/remote-keys.txt \
+  --suggested-fee-recipient=<YOUR_ETH_ADDRESS>
+```
+
+{/* Verified against Web3Signer CLI options docs (default --http-listen-port 9000), 2026-09 */}
+Port 9000 is Web3Signer's default `--http-listen-port`. Web3Signer only accepts `localhost` and `127.0.0.1` by default; if it runs on another host, add the validator's hostname to its `--http-host-allowlist`.
+
+Startup fails with `no web3signer public keys or key file path provided` if you set the URL but no key source.
+
+## Choose which keys to validate
+
+Prysm combines keys from up to three sources and validates their union:
+
+| Source | Flag | Changes while running |
+| --- | --- | --- |
+| Static list | <Flag name="validators-external-signer-public-keys" bin="validator" /> with comma-separated keys | No |
+| Public keys URL | <Flag name="validators-external-signer-public-keys" bin="validator" /> with a single URL | Only with <Flag name="validators-external-signer-poll-interval" bin="validator" /> |
+| Key file | <Flag name="validators-external-signer-key-file" bin="validator" /> | Yes, the file is watched |
+
+A static list:
+
+```bash
+--validators-external-signer-public-keys=0x<PUBKEY_1>,0x<PUBKEY_2>
+```
+
+A URL returning a JSON array of keys, usually Web3Signer's own list:
+
+```bash
+--validators-external-signer-public-keys=http://127.0.0.1:9000/api/v1/eth2/publicKeys
+```
+
+:::danger[One set of keys, one validator client]
+Web3Signer's `/api/v1/eth2/publicKeys` returns every key it holds. If two validator clients point at the same Web3Signer with that URL, both validate every key, which is the setup that gets validators slashed. When a Web3Signer serves several validator clients, give each one an explicit list or its own key file. Enable Web3Signer's own slashing protection as a second line of defense.
+:::
+
+## Persist keys in a key file
+
+<Flag name="validators-external-signer-key-file" bin="validator" /> points at a text file with one public key per line (`0x` prefix optional; blank lines and duplicates are ignored, invalid lines are logged and skipped). It serves two purposes:
+
+- Prysm watches the file and starts or stops validating keys when you edit it, without a restart.
+- Keys added or removed through the Keymanager API are written to it, so they survive restarts.
+
+The file must exist before the validator starts; create an empty one if you have no keys yet:
+
+```bash
+sudo -u validator touch /var/lib/ethereum/validator/remote-keys.txt
+```
+
+Otherwise startup fails with `no file exists in remote signer key file path`. Prysm replaces the file atomically through a temporary file, so the **directory** must be writable by the validator user; if it isn't, Prysm warns that Keymanager API imports and deletions will fail, and keys already in the file keep validating.
+
+## Poll the public keys URL
+
+When <Flag name="validators-external-signer-public-keys" bin="validator" /> is a URL, the key list is read once at startup. <Flag name="validators-external-signer-poll-interval" bin="validator" /> re-reads it on an interval so keys you add to or remove from Web3Signer are picked up:
+
+```bash
+--validators-external-signer-public-keys=http://127.0.0.1:9000/api/v1/eth2/publicKeys \
+--validators-external-signer-poll-interval=1m
+```
+
+With polling on:
+
+- the validator starts even if the URL is unreachable at startup (with no keys from that source, retrying at the next poll);
+- a failed request or an empty list keeps the current keys (`Could not refresh Web3Signer public keys from URL; keeping current keys`). Emptying Web3Signer therefore does **not** stop validation; restart the validator or remove the keys from the other sources;
+- polling only replaces the URL's own keys; keys from a static list or the key file are unaffected.
+
+The interval has no effect with a static key list; Prysm warns if you set it anyway.
+
+## Manage remote keys with the Keymanager API
+
+Start the validator with <Flag name="rpc" bin="validator" /> to enable the [Keymanager API](/reference/apis/keymanager-api/). With Web3Signer, the remote-keys endpoints apply:
+
+| Endpoint | Effect |
+| --- | --- |
+| `GET /eth/v1/remotekeys` | Lists the keys this validator client uses, from all sources. |
+| `POST /eth/v1/remotekeys` | Adds keys. Requires <Flag name="validators-external-signer-key-file" bin="validator" />; without it every key fails with `no persistent storage for remote keys is configured`. |
+| `DELETE /eth/v1/remotekeys` | Removes keys from the key file. Keys that come from the static list or the URL can't be deleted this way and return an error. |
+
+```bash
+curl -X POST http://127.0.0.1:7500/eth/v1/remotekeys \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"remote_keys":[{"pubkey":"0x<PUBKEY>"}]}'
+```
+
+The per-key `url` field of the standard request is ignored: Prysm only signs with the Web3Signer set by <Flag name="validators-external-signer-url" bin="validator" /> and logs a warning if you send one. The local-keystore endpoints (`/eth/v1/keystores`) don't work in this mode.
+
+The Prysm web UI (<Flag name="web" bin="validator" />) doesn't fully support Web3Signer; Prysm warns if you combine them.
+
+## TLS and authentication
+
+Prysm has no TLS options of its own for Web3Signer. Use an `https://` URL, and Prysm verifies Web3Signer's certificate against the operating system's trusted CAs; for a private CA, add it to the system trust store. Prysm can't present a client certificate, so Web3Signer's client-certificate allowlists (`--tls-known-clients-file`, `--tls-allow-ca-clients`) can't be used to authenticate it. {/* Web3Signer TLS options checked against docs.web3signer.consensys.io CLI reference, 2026-09 */}
+
+In practice, keep Web3Signer on a private network or the same host, and restrict access with a firewall and `--http-host-allowlist`.
+
+## Exit validators that use a remote signer
+
+`validator accounts voluntary-exit` and `prysmctl validator exit` accept the same two flags. The exit is signed by Web3Signer and submitted through the beacon node's gRPC API:
+
+```bash
+./prysm.sh validator accounts voluntary-exit \
+  --hoodi \
+  --beacon-rpc-provider=127.0.0.1:4000 \
+  --validators-external-signer-url=http://127.0.0.1:9000 \
+  --validators-external-signer-public-keys=0x<PUBKEY>
+```
+
+You then pick the keys to exit and confirm. See [Exit a validator](/validators/exit/).
+
+## Distributed validators
+
+For distributed validator technology (DVT), such as an Obol Charon cluster, the validator client runs normally with its own key shares and talks to the DVT middleware as if it were a beacon node. Set <Flag name="distributed" bin="validator" /> so Prysm fetches aggregation selections through the middleware, and point the REST provider at the middleware:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --distributed \
+  --beacon-rest-api-provider=http://127.0.0.1:3600 \
+  --wallet-dir=<WALLET_DIR> \
+  --wallet-password-file=<PASSWORD_FILE>
+```
+
+{/* Verified: charon cmd/run.go --validator-api-address default 127.0.0.1:3600 (main, 2026-09). */}
+<Flag name="distributed" bin="validator" /> needs the REST API; without it startup fails with `--distributed requires --enable-beacon-rest-api`.
+
+## Troubleshooting
+
+**`no web3signer public keys or key file path provided`.** Add <Flag name="validators-external-signer-public-keys" bin="validator" /> or <Flag name="validators-external-signer-key-file" bin="validator" />.
+
+**`no file exists in remote signer key file path`.** Create the file (it can be empty) before starting.
+
+**`web3signer url ... is invalid`.** The URL needs a scheme and host, for example `http://10.0.0.5:9000`.
+
+**Signing requests fail with connection errors.** Check that Web3Signer is up (`curl http://<HOST>:9000/upcheck` returns `OK`) and that the validator's host is in Web3Signer's `--http-host-allowlist`.
+
+## Next steps
+
+- [Remote signer topology](/setup/topologies/remote-signer/): how to lay out Web3Signer and its slashing protection.
+- [Validator client flags](/flags/validator/): the rest of the validator configuration.
+- [Keymanager API reference](/reference/apis/keymanager-api/).

@@ -1,0 +1,252 @@
+---
+title: "Run with Docker Compose [TBR]"
+description: Run the execution client, Prysm beacon node and validator with Docker Compose, so they start at boot, restart after a crash and keep their logs under control.
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+
+Running from a terminal is fine for a first test, but a real node must start at boot and restart by itself after a crash. Docker Compose does both.
+
+The examples keep the data on the host, in this layout:
+
+```text
+/var/lib/ethereum/
+├── jwt.hex              # shared by the execution client and beacon node
+├── execution/           # execution client data
+├── beacon/              # beacon node data
+└── validator/           # wallet, wallet-password.txt, slashing protection
+```
+
+## Before you begin
+
+- A working setup you've tried in a terminal: see the [Quickstart](/get-started/quickstart/) and [Connect your execution client](/setup/connect-execution-client/).
+- Docker Engine with the Compose plugin. This must print v2 or later:
+
+  ```bash
+  docker compose version
+  ```
+
+- For the validator: your keystores and an address you control for fees.
+
+## Set up the services
+
+The examples use Geth on Hoodi. For another client, see Other execution clients, at the end of this page.
+
+<Steps>
+
+1. **Create the directories and the JWT secret.** Prysm's images run as UID and GID `1001`, so their directories belong to that ID. Geth's image runs as root.
+
+	```bash
+	sudo install -d -m 0700 /var/lib/ethereum
+	sudo install -d /var/lib/ethereum/execution
+	sudo install -d -m 0700 -o 1001 -g 1001 /var/lib/ethereum/beacon /var/lib/ethereum/validator
+	openssl rand -hex 32 | tr -d "\n" | sudo tee /var/lib/ethereum/jwt.hex > /dev/null
+	sudo chmod 0644 /var/lib/ethereum/jwt.hex
+	mkdir -p ~/ethereum-compose && cd ~/ethereum-compose
+	```
+
+	The secret is readable by every container that mounts it, while `/var/lib/ethereum` itself stays closed to other users on the host.
+
+2. **Save the compose file** as `~/ethereum-compose/docker-compose.yml`:
+
+	{/* Checked against the Compose Specification and images gcr.io/offchainlabs/prysm/*:v7.2.0 and ethereum/client-go:v1.17.6, 2026-09. */}
+
+	```yaml title="docker-compose.yml"
+	name: ethereum
+
+	# Rotate each container's log at 100 MB and keep 5 files.
+	x-logging: &logging
+	  driver: json-file
+	  options:
+	    max-size: "100m"
+	    max-file: "5"
+
+	services:
+	  execution:
+	    image: ethereum/client-go:v1.17.6
+	    restart: unless-stopped
+	    stop_grace_period: 10m
+	    command:
+	      - --${NETWORK}
+	      - --datadir=/data
+	      - --authrpc.addr=0.0.0.0
+	      - --authrpc.vhosts=*
+	      - --authrpc.jwtsecret=/jwt.hex
+	    volumes:
+	      - /var/lib/ethereum/execution:/data
+	      - /var/lib/ethereum/jwt.hex:/jwt.hex:ro
+	    ports:
+	      - "30303:30303/tcp"
+	      - "30303:30303/udp"
+	    logging: *logging
+
+	  beacon:
+	    image: gcr.io/offchainlabs/prysm/beacon-chain:${PRYSM_VERSION}
+	    user: "1001:1001"
+	    restart: unless-stopped
+	    stop_grace_period: 15m
+	    depends_on: [execution]
+	    command:
+	      - --${NETWORK}
+	      - --datadir=/data
+	      - --execution-endpoint=http://execution:8551
+	      - --jwt-secret=/jwt.hex
+	      - --checkpoint-sync-url=${CHECKPOINT_SYNC_URL}
+	      - --suggested-fee-recipient=${FEE_RECIPIENT}
+	      - --http-host=0.0.0.0
+	      - --rpc-host=0.0.0.0
+	      - --postpone-shutdown-for-proposals
+	      - --accept-terms-of-use
+	    volumes:
+	      - /var/lib/ethereum/beacon:/data
+	      - /var/lib/ethereum/jwt.hex:/jwt.hex:ro
+	    ports:
+	      - "13000:13000/tcp"
+	      - "13000:13000/udp"
+	      - "12000:12000/udp"
+	      - "127.0.0.1:3500:3500"
+	    logging: *logging
+
+	  validator:
+	    image: gcr.io/offchainlabs/prysm/validator:${PRYSM_VERSION}
+	    profiles: ["validator"]
+	    user: "1001:1001"
+	    restart: unless-stopped
+	    stop_grace_period: 2m
+	    depends_on: [beacon]
+	    command:
+	      - --${NETWORK}
+	      - --datadir=/data
+	      - --wallet-dir=/data/wallet
+	      - --wallet-password-file=/data/wallet-password.txt
+	      - --beacon-rpc-provider=beacon:4000
+	      - --suggested-fee-recipient=${FEE_RECIPIENT}
+	      - --accept-terms-of-use
+	    volumes:
+	      - /var/lib/ethereum/validator:/data
+	    logging: *logging
+	```
+
+	The Engine API (8551) and gRPC (4000) stay inside the Docker network. Only the peer-to-peer ports are published to the internet; the APIs are published to `127.0.0.1` only. `stop_grace_period: 15m` gives <Flag name="postpone-shutdown-for-proposals" /> time to wait for a proposal; Docker's default of 10 seconds would kill the node mid-write.
+
+3. **Save the settings** as `~/ethereum-compose/.env`, next to the compose file:
+
+	```ini title=".env"
+	PRYSM_VERSION=<PRYSM_VERSION>
+	NETWORK=hoodi
+	CHECKPOINT_SYNC_URL=https://hoodi.beaconstate.ethstaker.cc
+	FEE_RECIPIENT=<YOUR_WALLET_ADDRESS>
+	# Uncomment once your keys are imported:
+	# COMPOSE_PROFILES=validator
+	```
+
+	Replace `<PRYSM_VERSION>` with the release to run, currently <PrysmVersion />, and `<YOUR_WALLET_ADDRESS>` with an address you control. To update later, change the version and run:
+
+	```bash
+	docker compose pull && docker compose up -d
+	```
+
+	On mainnet, use `NETWORK=mainnet` and a mainnet [checkpoint sync](/setup/checkpoint-sync/) URL.
+
+4. **Start the execution client and beacon node:**
+
+	```bash
+	docker compose up -d
+	```
+
+	`restart: unless-stopped` restarts a container after a crash or reboot, unless you stopped it yourself.
+
+5. **Add the validator.** Create the password file, import your keys with a one-off container, then turn on the `validator` profile. Replace `<PATH_TO_VALIDATOR_KEYS>` with your keystore folder (readable by UID 1001):
+
+	```bash
+	read -rs -p "Wallet password: " PW && printf '%s' "$PW" | sudo tee /var/lib/ethereum/validator/wallet-password.txt > /dev/null && unset PW
+	sudo chown 1001:1001 /var/lib/ethereum/validator/wallet-password.txt
+	sudo chmod 0600 /var/lib/ethereum/validator/wallet-password.txt
+	docker compose run --rm -v <PATH_TO_VALIDATOR_KEYS>:/keys:ro \
+	  validator accounts import \
+	  --hoodi \
+	  --keys-dir=/keys \
+	  --wallet-dir=/data/wallet \
+	  --wallet-password-file=/data/wallet-password.txt \
+	  --accept-terms-of-use
+	```
+
+	Uncomment `COMPOSE_PROFILES=validator` in `.env`, then run this again:
+
+	```bash
+	docker compose up -d
+	```
+
+</Steps>
+
+**Logs.**
+
+```bash
+docker compose logs -f beacon              # follow the beacon node
+docker compose logs --since 1h validator   # the last hour
+```
+
+The `x-logging` block rotates the logs; without it, Docker keeps them forever.
+
+**Everyday commands.**
+
+```bash
+docker compose stop             # stop everything
+docker compose up -d            # start it again
+docker compose restart beacon   # restart one service
+docker compose down             # remove the containers
+```
+
+`docker compose down` keeps your data in `/var/lib/ethereum`.
+
+:::danger[One validator client per key]
+Never run the validator service on two machines, or next to another validator client, with the same keys. Both would sign, and the keys would be slashed.
+:::
+
+Prysm also keeps up to 24 hours of debug logs in `<datadir>/logs/` (at most about 500 MB). To turn that off, add <Flag name="disable-ephemeral-log-file" />.
+
+## Other execution clients
+
+Replace the `execution` service's image and command with your client's, using `/data` for its data and `/jwt.hex` for the secret. The flags are on [Connect your execution client](/setup/connect-execution-client/). Bind the Engine API to `0.0.0.0` inside the container so the `beacon` container can reach it, and allow the `execution` host name.
+
+{/* Verified against Nethermind 2.0.0, Besu 26.9.0, Erigon v3.7.0, Reth v2.7.0 and Ethrex v27.0.0 (CLI docs and images at those tags), 2026-09. */}
+
+| Client | Image and user |
+| --- | --- |
+| Nethermind | `nethermind/nethermind:2.0.0`, runs as root. Set `--JsonRpc.EngineHost` and `--JsonRpc.EnginePort` together. |
+| Besu | `hyperledger/besu:26.9.0`; run with `user: "1000:1000"` and `chown 1000:1000` the data directory. Use `--engine-host-allowlist=*` and `--rpc-http-host=0.0.0.0`. |
+| Erigon | `erigontech/erigon:v3.7.0`, runs as UID 1000: `chown 1000:1000` the data directory. Add `--externalcl`, and publish port 42069 (TCP and UDP) for its history downloads. |
+| Reth | `ghcr.io/paradigmxyz/reth:v2.7.0`, runs as root. The command starts with `node`; add `--full`. |
+| Ethrex | `ghcr.io/lambdaclass/ethrex:27.0.0` (no `v` in the tag), runs as root. Data goes in a subfolder named after the network. |
+
+## Check that it works
+
+```bash
+docker compose ps
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+All services should be `running`. Once the node is synced, `is_syncing` is `false`. Reboot the machine once and run the same commands: everything should come back by itself.
+
+## Troubleshooting
+
+**`permission denied` reading `jwt.hex`.**
+Check that the file is `0644`.
+
+**`permission denied` in the data directory.**
+The directory belongs to another user, often after running a binary by hand as root. Prysm's containers run as UID 1001. Fix it:
+
+```bash
+sudo chown -R 1001:1001 /var/lib/ethereum/beacon
+```
+
+**A container restarts in a loop.**
+Read the last error:
+
+```bash
+docker compose logs --tail 50 beacon
+```
+
+A misspelled or removed flag stops Prysm at startup; compare with the [beacon-chain reference](/reference/cli/beacon-chain/).

@@ -1,0 +1,87 @@
+---
+title: MEV and block building
+description: How proposer-builder separation works with MEV-Boost and relays, how Prysm decides between a builder's block and its own, the risks, and what changes with ePBS in Gloas.
+---
+
+import { Aside, LinkCard, CardGrid, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+When one of your validators proposes, the block's transactions can come from two places: your own execution client (**local building**), or a specialized **block builder** that pays you for the right to fill the block. Builders pay because ordering transactions well is valuable, a value known as MEV (maximal extractable value). Most mainnet blocks today are built this way, through **MEV-Boost**. Prysm always prepares a local block as well, and falls back to it whenever the builder path is worse or fails.
+
+## Who does what
+
+| Party | Role |
+| --- | --- |
+| **Searchers and users** | Send transactions and bundles to builders |
+| **Builders** | Assemble the most valuable block they can and bid for the slot |
+| **Relays** | Sit between builders and proposers. They check builders' blocks, hold the payload in escrow, and only forward the block header and bid to the proposer |
+| **MEV-Boost** | A sidecar next to your beacon node. It queries all the relays you configured and passes the best bid on |
+| **Your beacon node** | Compares the best bid with its local block, picks one, and publishes the result |
+| **Your validator client** | Registers your validators with the builder network, and signs the block without seeing its transactions |
+
+This split is called **proposer-builder separation** (PBS). Today it happens outside the protocol, which is why relays exist: they are the trusted party that stops a proposer from stealing a builder's transactions, and a builder from not paying.
+
+## How a builder block is proposed
+
+<Steps>
+
+1. **Registration.** The validator client signs a registration for each validator (fee recipient, gas limit, timestamp) and sends it through the beacon node to MEV-Boost, which forwards it to the relays. This repeats regularly so relays know who proposes and where to pay.
+
+2. **Bid request.** At the start of your slot, the beacon node asks MEV-Boost for a header over the Builder API. MEV-Boost asks every relay and returns the highest bid. Prysm waits up to <Flag name="builder-header-timeout" /> (1 second by default). In parallel, the beacon node gets its local payload from the execution client with `engine_getPayload`.
+
+3. **Choice.** The beacon node compares the two (see below). If it keeps the local payload, the proposal continues as a normal block.
+
+4. **Blind signing.** If the builder wins, the beacon node builds a **blinded block**: a complete beacon block with only the payload header, not the transactions. The validator client signs it.
+
+5. **Reveal.** The beacon node sends the signed blinded block back through MEV-Boost to the relay. The relay checks the signature and publishes the full block with its transactions and blobs. Since Fulu, Prysm uses the version of this call in which the relay publishes the block without sending the payload back.
+
+</Steps>
+
+The builder's payment to your fee recipient is usually a transaction at the end of the block itself, and shows up in block explorers.
+
+## How Prysm chooses between builder and local
+
+Prysm only uses a builder block if every check passes. Otherwise it uses the local payload and logs why, with messages that start with `Proposer: using local execution payload because…`.
+
+| Check | Default | Configure with |
+| --- | --- | --- |
+| The builder bid is at least a minimum value, in Gwei | No minimum | <Flag name="min-builder-bid" /> |
+| The builder bid beats the local value by at least a fixed amount, in Gwei | No minimum | <Flag name="min-builder-to-local-difference" /> |
+| `builder_bid × builder_boost_factor > local_value × (100 + local boost)` | Local boost 10%, boost factor 100 | <Flag name="local-block-value-boost" />; the builder boost factor per validator, see below |
+| The builder's withdrawals match the ones the chain expects | Always | – |
+| The execution client hasn't asked to override the builder | Always | The EL sets `shouldOverrideBuilder`, for example if it suspects censorship |
+| The circuit breaker is off | Trips after 3 missed slots in a row, or 5 in the last 32 slots | <Flag name="max-builder-consecutive-missed-slots" />, <Flag name="max-builder-epoch-missed-slots" /> |
+
+With the defaults, a builder block must be worth more than 110% of the local block. The **builder boost factor** is the validator-side knob from the Beacon API: 100 is neutral, 0 means always build locally, and a very large value means always prefer the builder. Prysm's validator client sends it per validator from the `builder_boost_factor` field of the `builder` section in the [proposer settings](/flags/proposer-settings/). Prysm warns `both local boost and builder boost are using non default values` if you set both; pick one.
+
+The circuit breaker exists because a chain that is missing many blocks may be in trouble with relays or builders. Falling back to local blocks keeps it going.
+
+{/* Verified: v7.2.0 config/proposer/settings.go BuilderConfig has `builder_boost_factor` (json/yaml); unset resolves to NeutralBuilderBoostFactor = 100. */}
+
+## Risks and trade-offs
+
+- **You trust the relay.** Once you sign a blinded block, you can't sign another block for that slot without being slashed. If the relay fails to publish the payload, you miss the slot and its rewards. Prysm can't recover this. Use relays you trust, and more than one.
+- **Timing.** The builder path adds network round trips at the start of the slot. A slow relay makes your block late and more likely to be orphaned.
+- **Censorship and centralization.** A few builders produce most blocks, and relays apply their own filtering policies. Local building, or a higher local boost, keeps your blocks independent of them.
+- **Transparency.** You don't see the transactions you sign until after the block is published. The fee recipient and gas limit you registered are what relays promise to respect.
+
+Local building is always a valid choice: blocks are smaller in value on average but fully under your control. You can stay local simply by not configuring <Flag name="http-mev-relay" />.
+
+## ePBS in Gloas
+
+The next fork after Fulu, **Gloas**, brings **enshrined proposer-builder separation** (ePBS, [EIP-7732](https://eips.ethereum.org/EIPS/eip-7732)) into the protocol. As implemented in Prysm's source:
+
+- The beacon block no longer carries the execution payload. It carries a **signed bid** from a builder, committing to a payload and a payment.
+- The builder reveals the payload afterwards in a separate **execution payload envelope**.
+- A **payload timeliness committee** of validators votes, at 75% of the slot, on whether the payload was revealed in time. Attestations move to 25% and aggregates to 50% of the slot.
+- Builders are staked and their payment is settled by the protocol, so the proposer no longer has to trust a relay for it. The proposer can also build its own payload.
+
+Prysm already contains Gloas block production: the beacon node can self-build, take bids from the P2P network, or ask builders listed in the proposer settings for bids, and the validator client has a <Flag name="stateless" bin="validator" /> mode for Gloas block production. Gloas is **not scheduled on mainnet**; testnet dates appear in [Networks](/reference/networks/) as they are set. The details may still change before it ships, so treat this section as a preview.
+
+## Next steps
+
+<CardGrid>
+	<LinkCard title="Use MEV-Boost" description="Install MEV-Boost and connect it to Prysm." href="/validators/mev-boost/" />
+	<LinkCard title="Block building and MEV flags" description="Every beacon node flag for builders and local building." href="/flags/block-building/" />
+	<LinkCard title="Fee recipient and proposer settings" description="Where your execution rewards go." href="/validators/fee-recipient/" />
+</CardGrid>

@@ -1,0 +1,133 @@
+---
+title: "Add or remove validators without restarting [TBR]"
+description: "Import and remove validator keys, and change per-key fee recipients, on a running Prysm validator client with the standard Keymanager API."
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The **Keymanager API** lets you change a running validator client without restarting it: import or remove keys, and set a fee recipient or graffiti per key. It's a standard API that every consensus client implements, so staking tools built for it work with Prysm. This page uses `curl`; for all endpoints, see [APIs](/reference/apis/).
+
+## Before you begin
+
+- A running validator client with a wallet. See [Import keys](/validators/import-keys/).
+- `curl` and `jq` on the validator machine. Run the commands there: the API listens on `127.0.0.1` and must stay local.
+
+## Enable the API
+
+<Steps>
+
+1. **Start the validator with <Flag name="rpc" bin="validator" />** and a token file:
+
+   ```bash
+   ./prysm.sh validator \
+     --hoodi \
+     --wallet-dir=./wallet \
+     --wallet-password-file=./wallet-password.txt \
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+     --rpc \
+     --keymanager-token-file=./wallet/auth-token
+   ```
+
+   The API listens on `http://127.0.0.1:7500`. Prysm creates the token file if it doesn't exist. Set <Flag name="keymanager-token-file" bin="validator" /> explicitly: otherwise the token goes to the default wallet location, even with a custom <Flag name="wallet-dir" bin="validator" />.
+
+2. **Check the log** for the token path:
+
+   ```text
+   INFO rpc: Validator Client auth token for gRPC and REST authentication set at ./wallet/auth-token
+   ```
+
+3. **Load the token** into your shell:
+
+   ```bash
+   TOKEN=$(cat ./wallet/auth-token)
+   API=http://127.0.0.1:7500
+   ```
+
+</Steps>
+
+:::danger[The token controls your keys]
+Anyone with the token can remove your keys or sign exits for them. Keep the file readable only by the validator's user, and never expose port 7500 to other machines.
+:::
+
+## List keys
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" $API/eth/v1/keystores | jq
+```
+
+## Add a key
+
+Send the keystore file and its password. If the key has **ever** signed anywhere, also send its slashing protection history (see [Avoid slashing](/validators/avoid-slashing/)):
+
+```bash
+jq -n \
+  --rawfile ks <PATH_TO>/keystore-m_12381_3600_0_0_0-<TIMESTAMP>.json \
+  --arg pw "$(cat <KEYSTORE_PASSWORD_FILE>)" \
+  --rawfile sp <PATH_TO>/slashing_protection.json \
+  '{keystores: [$ks], passwords: [$pw], slashing_protection: $sp}' \
+| curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @- \
+  $API/eth/v1/keystores | jq
+```
+
+For a brand-new key, drop the `--rawfile sp` line and the `slashing_protection` field. The response gives each key a status: `imported`, `duplicate` (already there) or `error` with a message. The validator starts duties for imported keys without a restart; with doppelganger protection on, it first waits at least two epochs.
+
+## Remove a key
+
+Removing a key returns its slashing protection history. Save it in the same step:
+
+```bash
+curl -s -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pubkeys":["<VALIDATOR_PUBKEY>"]}' \
+  $API/eth/v1/keystores \
+| tee delete-response.json | jq '.data'
+
+jq -r '.slashing_protection' delete-response.json > slashing_protection.json
+```
+
+The status is `deleted`, `not_active`, `not_found` or `error`. Import `slashing_protection.json` wherever the key runs next.
+
+:::caution
+Removing a key doesn't exit the validator. It stays active and loses balance until something signs for it again. To stop for good, exit the validator.
+:::
+
+## Change the fee recipient or graffiti of a key
+
+```bash
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"ethaddress":"<FEE_RECIPIENT_ADDRESS>"}' \
+  $API/eth/v1/validator/<VALIDATOR_PUBKEY>/feerecipient
+
+curl -s -X POST \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"graffiti":"<GRAFFITI>"}' \
+  $API/eth/v1/validator/<VALIDATOR_PUBKEY>/graffiti
+```
+
+`GET` on the same path reads the value; `DELETE` removes it so the key uses the default again. Prysm keeps these values across restarts, **unless** you start the validator with a proposer settings file that has a `proposer_config` section, which replaces them. See [Set your fee recipient](/validators/fee-recipient/).
+
+## Check that it works
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $TOKEN" \
+  $API/eth/v1/keystores
+```
+
+`200` means the API is up and your token works. After adding or removing keys, list them again.
+
+## Troubleshooting
+
+**`Failed to connect to 127.0.0.1 port 7500`** The validator runs without <Flag name="rpc" bin="validator" />, or on another <Flag name="http-port" bin="validator" />.
+
+**`401` or `403`** Missing or wrong token. Load the file named in the `auth token ... set at` log line.
+
+**Import returns `error` with a remote signer.** Keys held by a remote signer are added with `/eth/v1/remotekeys` instead. See [Use a remote signer](/validators/remote-signer/).

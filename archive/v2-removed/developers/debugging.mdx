@@ -1,0 +1,221 @@
+---
+title: Debugging and profiling
+description: Debug and profile Prysm with per-package log levels, the debug log file, pprof, OpenTelemetry tracing, Delve, the debug Beacon API endpoints, and database inspection tools.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+This page collects the tools for finding out what a Prysm process is doing: logs at the right level, CPU and memory profiles, traces of individual requests, a debugger, the debug API, and direct access to the database. Most of them work on a running node without a rebuild.
+
+The logging, pprof and tracing flags work the same on `beacon-chain` and `validator`; the examples use the beacon node. The debug API, database and invalid-data sections apply to the beacon node only.
+
+## Logs
+
+### Raise the log level
+
+<Flag name="verbosity" /> sets the level for the whole process: `trace`, `debug`, `info` (the default), `warn`, `error`, `fatal` or `panic`.
+
+```bash
+beacon-chain --verbosity=debug …
+```
+
+`debug` is readable on a running node. `trace` is very noisy and mostly useful for a single package.
+
+### Per-package log levels
+
+<Flag name="log.vmodule" /> sets the level for specific packages, on top of <Flag name="verbosity" />. Each entry is `<package path>=<level>`, separated by commas:
+
+```bash
+beacon-chain \
+  --verbosity=info \
+  --log.vmodule=beacon-chain/sync=debug,beacon-chain/p2p=trace \
+  …
+```
+
+The package path is the one in the package's generated `log.go`, for example `beacon-chain/sync` for `var log = logrus.WithField("package", "beacon-chain/sync")`. An entry also applies to subpackages: `beacon-chain/sync=debug` covers `beacon-chain/sync/initial-sync` too. Paths can't contain wildcards, a leading or trailing slash, or duplicates; Prysm refuses to start and names the bad entry.
+
+In text logs, the prefix after the level (`sync`, `p2p`, `blockchain`) is the last element of the package path, which tells you which path to use.
+
+### Log format and files
+
+| Flag | Use it to |
+| --- | --- |
+| <Flag name="log-format" /> | Switch to `json`, `fluentd` or `journald` output for log processing tools. |
+| <Flag name="log-file" /> | Also write logs to a file. |
+| <Flag name="disable-log-colors" /> | Remove ANSI colors, for example when piping to a file. |
+
+Unless you pass <Flag name="disable-ephemeral-log-file" />, Prysm also keeps a debug-level log of the last 24 hours in `<datadir>/logs/beacon-chain.log` (`validator.log` for the validator client), whatever <Flag name="verbosity" /> is set to. When a problem has already happened at `info` level, look there first.
+
+For more on operating with logs, see [Logs](/operate/logs/).
+
+## Profile with pprof
+
+Prysm serves Go's standard [pprof](https://pkg.go.dev/net/http/pprof) endpoints when you pass <Flag name="pprof" />:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="pprof" /> | off | Starts the pprof HTTP server. |
+| <Flag name="pprofaddr" /> | `127.0.0.1` | Listening address. |
+| <Flag name="pprofport" /> | `6060` | Listening port. |
+| <Flag name="memprofilerate" /> | `524288` | Bytes allocated per sampled allocation in heap profiles. Lower is more detailed and slower. |
+| <Flag name="blockprofilerate" /> | `0` (off) | Turns on block profiling at this rate. |
+| <Flag name="mutexprofilefraction" /> | `0` (off) | Turns on mutex contention profiling: 1 in N events is sampled. |
+
+At startup, the node logs:
+
+```text
+INFO debug: Starting pprof server addr=http://127.0.0.1:6060/debug/pprof
+```
+
+Collect and open profiles with `go tool pprof`:
+
+```bash
+# 30-second CPU profile, opened in a web UI
+go tool pprof -http=:8081 'http://127.0.0.1:6060/debug/pprof/profile?seconds=30'
+
+# Heap in use now
+go tool pprof -http=:8081 http://127.0.0.1:6060/debug/pprof/heap
+
+# Every goroutine with its stack, as text
+curl -s 'http://127.0.0.1:6060/debug/pprof/goroutine?debug=2' > goroutines.txt
+
+# Execution trace for 5 seconds
+curl -s -o trace.out 'http://127.0.0.1:6060/debug/pprof/trace?seconds=5'
+go tool trace trace.out
+```
+
+The `block` and `mutex` profiles are empty unless you set <Flag name="blockprofilerate" /> or <Flag name="mutexprofilefraction" /> at startup.
+
+<Aside type="caution">
+Keep <Flag name="pprofaddr" /> on `127.0.0.1`. The pprof endpoints have no authentication, and profiling a node costs CPU. Reach a remote node's pprof through an SSH tunnel.
+</Aside>
+
+Without pprof, the metrics server still serves a goroutine dump at `http://127.0.0.1:8080/goroutinez` (port <Flag name="monitoring-port" />). See [Prysm-specific APIs](/reference/apis/prysm-api/).
+
+For readable C frames (blst, c-kzg) in profiles and crash stack traces, build with `--config=cgo_symbolizer`. See [Build with Bazel](/developers/build/#build-configurations).
+
+## Trace with OpenTelemetry
+
+Prysm instruments block processing, sync, RPC handlers and other paths with [OpenTelemetry](https://opentelemetry.io/) spans, and exports them over OTLP/HTTP:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="enable-tracing" /> | off | Turns on tracing. |
+| <Flag name="tracing-endpoint" /> | `http://127.0.0.1:14268/api/traces` | OTLP/HTTP URL traces are sent to, for example an OpenTelemetry Collector or Grafana Tempo. |
+| <Flag name="trace-sample-fraction" /> | `0.2` | Fraction of traces kept. `1.0` keeps all. |
+| <Flag name="tracing-process-name" /> | none | Value of the `process_name` tag, to tell several nodes apart. |
+
+For a local OpenTelemetry Collector or Tempo listening on the standard OTLP/HTTP port:
+
+```bash
+beacon-chain \
+  --enable-tracing \
+  --tracing-endpoint=http://127.0.0.1:4318/v1/traces \
+  --trace-sample-fraction=1.0 \
+  --tracing-process-name=beacon-dev \
+  …
+```
+
+Keep the sample fraction low on a busy node: a full trace of every request adds overhead. The end-to-end tests run with `--trace-sample-fraction=1.0` and a local tracing sink.
+
+## Step through code with Delve
+
+Build with `-c dbg` and run the binary under [Delve](https://github.com/go-delve/delve):
+
+```bash
+bazel build -c dbg //cmd/beacon-chain
+dlv exec bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain -- --config-file=$HOME/beacon-dev.yaml
+```
+
+[Run from source](/developers/run-from-source/#attach-a-debugger) covers breakpoints, attaching to a running process and VS Code. A paused beacon node falls behind the chain within seconds, so prefer logs and traces for timing-dependent problems.
+
+## Debug Beacon API endpoints
+
+The beacon node serves the Beacon API's `debug` namespace by default. <Flag name="disable-debug-rpc-endpoints" /> turns it off.
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /eth/v2/debug/beacon/states/{state_id}` | A full beacon state, as JSON or SSZ. |
+| `GET /eth/v2/debug/beacon/heads` | All current fork choice heads. |
+| `GET /eth/v1/debug/fork_choice` | The fork choice store: every node with its weight, validity and justification. |
+| `GET /eth/v1/debug/beacon/data_column_sidecars/{block_id}` | Data column sidecars of a block. |
+
+Fetch a state as SSZ, which is much smaller and faster than JSON:
+
+```bash
+curl -s -H 'Accept: application/octet-stream' \
+  -o head-state.ssz \
+  http://127.0.0.1:3500/eth/v2/debug/beacon/states/head
+```
+
+Dump fork choice to see why the node picked its head:
+
+```bash
+curl -s http://127.0.0.1:3500/eth/v1/debug/fork_choice | jq '.fork_choice_nodes | length'
+```
+
+States other than recent ones are regenerated by replaying blocks, which can take a long time and a lot of memory. See [Beacon API](/reference/apis/beacon-api/) for more.
+
+## Inspect the database
+
+The beacon node stores chain data in a BoltDB file at `<datadir>/beaconchaindata/beaconchain.db`. Bolt allows only one process to open the file, so **stop the beacon node first**, or copy the file and work on the copy.
+
+### prysmctl db
+
+`prysmctl db buckets` prints the names of the buckets the beacon node's schema defines (from `beacon-chain/db/kv`). It doesn't open a database.
+
+`prysmctl db query` lists the keys in a bucket that start with a prefix. Despite its help text, `--path` is the path of the database file itself:
+
+```bash
+prysmctl db query \
+  --path=$HOME/ethereum/consensus/beacon-dev/beaconchaindata/beaconchain.db \
+  --bucket=<BUCKET> \
+  --prefix=0x00 \
+  --print-keys
+```
+
+Only key listing is implemented: without `--print-keys`, it fails with `prefix scan with value display not implemented`. If the node is running, it fails with `cannot obtain database lock, database may be in use by another process`.
+
+`prysmctl db slasher-span-display` shows min and max span values from a slasher database, for debugging the slasher. Pass the directory that holds `slasher.db` with `--db-path-directory`.
+
+### exploredb
+
+`tools/exploredb` prints statistics and contents of a beacon database:
+
+```bash
+bazel run //tools/exploredb -- \
+  --datadir=$HOME/ethereum/consensus/beacon-dev/beaconchaindata \
+  --dbname=beaconchain.db \
+  --command=bucket-stats
+```
+
+| `--command` | Output |
+| --- | --- |
+| `bucket-stats` | For each non-empty bucket: number of rows, size, and minimum, average and maximum value size. |
+| `bucket-content` | Rows of the `state` or `state-summary` bucket (set with `--bucket-name`), up to `--limit` rows (default 10). |
+| `migration-check` | Compares validator entries between two databases (`--dest-datadir`, `--migration=validator-entries`). |
+
+## Capture invalid data
+
+Two beacon node feature flags write data that failed validation to the system's temporary directory, so you can load it in a test:
+
+- <Flag name="save-invalid-block-temp" /> writes invalid blocks.
+- <Flag name="save-invalid-blob-temp" /> writes invalid blobs.
+
+<Flag name="enable-full-ssz-data-logging" /> logs the full SSZ data of rejected gossip messages instead of a summary.
+
+## Check that it works
+
+Start a node with pprof and fetch its goroutine count:
+
+```bash
+curl -s 'http://127.0.0.1:6060/debug/pprof/goroutine?debug=1' | head -1
+```
+
+The first line reads `goroutine profile: total <N>`.
+
+## Next steps
+
+- [Run from source](/developers/run-from-source/)
+- [Logging and metrics flags](/flags/logging-and-metrics/)

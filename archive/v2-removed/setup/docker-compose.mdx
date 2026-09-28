@@ -1,0 +1,567 @@
+---
+title: Run Prysm with Docker Compose
+description: A complete docker-compose.yml that runs an execution client, the Prysm beacon node and the validator together, with a shared JWT secret, healthchecks, restart policies and log limits.
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Docker Compose runs the whole node from one file: an execution client, the Prysm beacon node and the Prysm validator, on a private Docker network. The file on this page generates the JWT secret on first start, keeps each component's data in its own directory under `/var/lib/ethereum`, restarts containers if they crash, and limits log size. For the images themselves, tags and single-container use, see [Docker](/install/docker/).
+
+## Before you begin
+
+- Docker Engine with the Compose plugin (`docker compose version` should print v2 or later). On Linux, follow [Install Docker Engine](https://docs.docker.com/engine/install/).
+- For the validator: your keystores, from [Create validator keys](/validators/create-keys/).
+- An Ethereum address you control for fee rewards.
+
+## Create the directories
+
+The Prysm containers run as the images' built-in `nonroot` user (UID and GID `1001`), so their directories belong to that UID. The execution client's directory must belong to the user its image runs as; see [The execution client service](#the-execution-client-service).
+
+```bash
+sudo mkdir -p /var/lib/ethereum/{execution,beacon,validator}
+sudo chown 1001:1001 /var/lib/ethereum/beacon /var/lib/ethereum/validator
+sudo chmod 700 /var/lib/ethereum/beacon /var/lib/ethereum/validator
+mkdir -p ~/ethereum-compose && cd ~/ethereum-compose
+```
+
+Keep `docker-compose.yml` and a `.env` file in `~/ethereum-compose`.
+
+## The compose file
+
+Save this as `~/ethereum-compose/docker-compose.yml`. It uses Geth; to use another execution client, replace the `execution` service with the one from [The execution client service](#the-execution-client-service).
+
+```yaml title="docker-compose.yml"
+name: ethereum
+
+# Shared log settings: rotate container logs at 100 MB, keep 5 files.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "100m"
+    max-file: "5"
+
+services:
+  # Creates the JWT secret on first start, then exits.
+  jwt-init:
+    image: gcr.io/offchainlabs/prysm/beacon-chain:${PRYSM_VERSION}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - test -s /jwt/jwt.hex || /beacon-chain generate-auth-secret --output-file=/jwt/jwt.hex; chmod 0444 /jwt/jwt.hex
+    volumes:
+      - jwt:/jwt
+    logging: *logging
+
+  execution:
+    image: ethereum/client-go:v1.17.6
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --${NETWORK}
+      - --datadir=/data
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.vhosts=*
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.api=eth,net,web3
+      - --port=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+
+  beacon:
+    image: gcr.io/offchainlabs/prysm/beacon-chain:${PRYSM_VERSION}
+    user: "1001:1001"
+    restart: unless-stopped
+    stop_grace_period: 15m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+      execution:
+        condition: service_started
+    command:
+      - --${NETWORK}
+      - --datadir=/data
+      - --execution-endpoint=http://execution:8551
+      - --jwt-secret=/jwt/jwt.hex
+      - --checkpoint-sync-url=${CHECKPOINT_SYNC_URL}
+      - --suggested-fee-recipient=${FEE_RECIPIENT}
+      - --http-host=0.0.0.0
+      - --rpc-host=0.0.0.0
+      - --monitoring-host=0.0.0.0
+      - --postpone-shutdown-for-proposals
+      - --accept-terms-of-use
+      # - --p2p-host-ip=<YOUR_PUBLIC_IP>
+      # - --http-mev-relay=http://mev-boost:18550
+    volumes:
+      - /var/lib/ethereum/beacon:/data
+      - jwt:/jwt:ro
+    ports:
+      - "13000:13000/tcp"
+      - "13000:13000/udp"
+      - "12000:12000/udp"
+      - "127.0.0.1:3500:3500"
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      # The image has bash but no curl: ask /eth/v1/node/health over /dev/tcp.
+      # 200 means synced, 206 means syncing; both count as healthy.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/3500 &&
+          printf 'GET /eth/v1/node/health HTTP/1.0\r\n\r\n' >&3 &&
+          read -r status <&3 &&
+          [[ $$status == *" 200 "* || $$status == *" 206 "* ]]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 10m
+    logging: *logging
+
+  validator:
+    image: gcr.io/offchainlabs/prysm/validator:${PRYSM_VERSION}
+    profiles: ["validator"]
+    user: "1001:1001"
+    restart: unless-stopped
+    stop_grace_period: 2m
+    depends_on:
+      beacon:
+        condition: service_healthy
+    command:
+      - --${NETWORK}
+      - --datadir=/data
+      - --wallet-dir=/data/wallet
+      - --wallet-password-file=/data/wallet-password.txt
+      - --beacon-rpc-provider=beacon:4000
+      - --suggested-fee-recipient=${FEE_RECIPIENT}
+      - --accept-terms-of-use
+      # - --enable-builder
+    volumes:
+      - /var/lib/ethereum/validator:/data
+    healthcheck:
+      # /healthz on the metrics port returns 200 when every validator service is healthy.
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8081 &&
+          printf 'GET /healthz HTTP/1.0\r\n\r\n' >&3 &&
+          read -r status <&3 &&
+          [[ $$status == *" 200 "* ]]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 2m
+    logging: *logging
+
+  # Optional: MEV-Boost. Uncomment, choose relays, and uncomment
+  # --http-mev-relay (beacon) and --enable-builder (validator) above.
+  # mev-boost:
+  #   image: flashbots/mev-boost:1.12
+  #   restart: unless-stopped
+  #   command:
+  #     - -${NETWORK}
+  #     - -addr=0.0.0.0:18550
+  #     - -relay-check
+  #     - -relay=${MEV_RELAY}
+  #   logging: *logging
+
+volumes:
+  jwt:
+```
+
+{/* Compose file checked against the Compose Specification and images gcr.io/offchainlabs/prysm/*:v7.2.0, ethereum/client-go:v1.17.6, flashbots/mev-boost:1.12 (config inspected in the registries), 2026-09. `docker compose config` validates it. */}
+{/* VERIFY: jwt-init and both bash /dev/tcp healthchecks not executed yet (no Docker daemon available to the writer); run `docker compose up` on Hoodi once to confirm. */}
+
+And this as `~/ethereum-compose/.env`, next to it. Compose substitutes these values into the file:
+
+```ini title=".env"
+# Prysm release to run. Change it to update.
+PRYSM_VERSION=v7.2.0
+# hoodi, mainnet or sepolia
+NETWORK=hoodi
+# A trusted checkpoint sync endpoint for that network
+CHECKPOINT_SYNC_URL=https://hoodi.beaconstate.ethstaker.cc
+# An address you control; receives priority fees and MEV rewards
+FEE_RECIPIENT=<YOUR_WALLET_ADDRESS>
+# Uncomment once your keys are imported, to run the validator too
+# COMPOSE_PROFILES=validator
+# For MEV-Boost: the URL of a relay you trust (add more -relay lines in the file for several)
+MEV_RELAY=
+```
+
+For mainnet, set `NETWORK=mainnet` and a mainnet checkpoint URL such as `https://beaconstate.ethstaker.cc`. See [Checkpoint sync](/setup/checkpoint-sync/).
+
+## What each part does
+
+- **`x-logging`**: Docker's default `json-file` log driver keeps logs forever. This anchor, reused by every service, rotates each container's log at 100 MB and keeps five files.
+
+- **`jwt-init`**: A one-shot container that writes a random secret to the `jwt` named volume the first time, and leaves it alone afterwards. The execution client and beacon node mount the volume read-only and wait for `jwt-init` to finish (`service_completed_successfully`). The file is world-readable inside the volume so that clients running under different UIDs can read it; the volume itself is only reachable by containers and root on the host.
+
+- **`execution`**: Listens for the Engine API on all interfaces inside the Docker network (`0.0.0.0:8551`), so the `beacon` container can reach it as `http://execution:8551`, but that port isn't published to the host. Its P2P port is published to the internet, and JSON-RPC (8545) to the host only.
+
+- **`beacon`**: Runs as UID 1001. Listens on `0.0.0.0` inside the container so the validator and your host can reach its APIs, but publishes only the P2P ports to the internet, and the Beacon API (3500) and metrics (8080) to `127.0.0.1`. <Flag name="postpone-shutdown-for-proposals" /> can delay a stop by up to about 13 minutes if a proposal is due, so `stop_grace_period: 15m` gives it time; Docker's default of 10 seconds would kill it mid-write.
+
+- **Healthcheck**: Marks the beacon node healthy once its Beacon API answers `/eth/v1/node/health` with 200 (synced) or 206 (still syncing). The validator waits for this before starting. The long `start_period` covers the first checkpoint download.
+
+- **`validator`**: Has no published ports: it only connects out to `beacon:4000`. It sits in the `validator` profile, so it only runs when `COMPOSE_PROFILES=validator` is set in `.env`. That lets you start the node first and add the validator once keys are imported; leave it unset for a node without validators.
+
+- **`restart: unless-stopped`**: Restarts a container after a crash or a reboot of the Docker daemon, but not if you stopped it with `docker compose stop`.
+
+- **`mev-boost`** (commented out): See [Use MEV-Boost](/validators/mev-boost/) for choosing relays and for what changes when builders are in use.
+
+## The execution client service
+
+Replace the `execution` service with the one for your client. Each image runs as a particular user, which must own `/var/lib/ethereum/execution`:
+
+<Tabs syncKey="el">
+<TabItem label="Geth">
+
+Runs as root; no `chown` needed.
+
+```yaml
+  execution:
+    image: ethereum/client-go:v1.17.6
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --${NETWORK}
+      - --datadir=/data
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.vhosts=*
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.api=eth,net,web3
+      - --port=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+<TabItem label="Nethermind">
+
+Runs as root; no `chown` needed. The image's entrypoint passes these arguments to `nethermind`. Nethermind's network names match `NETWORK`.
+
+```yaml
+  execution:
+    image: nethermind/nethermind:2.0.0
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --config=${NETWORK}
+      - --data-dir=/data
+      - --JsonRpc.Enabled=true
+      - --JsonRpc.Host=0.0.0.0
+      - --JsonRpc.Port=8545
+      - --JsonRpc.EngineHost=0.0.0.0
+      - --JsonRpc.EnginePort=8551
+      - --JsonRpc.JwtSecretFile=/jwt/jwt.hex
+      - --Network.P2PPort=30303
+      - --Network.DiscoveryPort=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+<TabItem label="Besu">
+
+Runs here as the image's `besu` user (UID 1000), which skips the image's start-up permission fixing: `sudo chown 1000:1000 /var/lib/ethereum/execution`.
+
+```yaml
+  execution:
+    image: hyperledger/besu:26.9.0
+    user: "1000:1000"
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --network=${NETWORK}
+      - --data-path=/data
+      - --engine-rpc-port=8551
+      - --engine-host-allowlist=*
+      - --engine-jwt-secret=/jwt/jwt.hex
+      - --rpc-http-enabled
+      - --rpc-http-host=0.0.0.0
+      - --rpc-http-port=8545
+      - --p2p-port=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+<TabItem label="Erigon">
+
+Runs as the image's `erigon` user (UID 1000): `sudo chown 1000:1000 /var/lib/ethereum/execution`. `--externalcl` turns off Erigon's built-in consensus client, and port 42069 is for BitTorrent history downloads.
+
+```yaml
+  execution:
+    image: erigontech/erigon:v3.7.0
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --chain=${NETWORK}
+      - --datadir=/data
+      - --externalcl
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.vhosts=*
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.api=eth,net,web3
+      - --port=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "42069:42069/tcp"
+      - "42069:42069/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+<TabItem label="Reth">
+
+Runs as root; no `chown` needed. The image's entrypoint is `reth`, so the command starts with `node`.
+
+```yaml
+  execution:
+    image: ghcr.io/paradigmxyz/reth:v2.7.0
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - node
+      - --chain=${NETWORK}
+      - --datadir=/data
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --http
+      - --http.addr=0.0.0.0
+      - --http.api=eth,net,web3
+      - --port=30303
+      - --log.file.directory=/data/logs
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+<TabItem label="Ethrex">
+
+Runs as root; no `chown` needed. Note that Ethrex image tags have no leading `v`.
+
+```yaml
+  execution:
+    image: ghcr.io/lambdaclass/ethrex:27.0.0
+    restart: unless-stopped
+    stop_grace_period: 10m
+    depends_on:
+      jwt-init:
+        condition: service_completed_successfully
+    command:
+      - --network=${NETWORK}
+      - --datadir=/data
+      - --authrpc.addr=0.0.0.0
+      - --authrpc.port=8551
+      - --authrpc.jwtsecret=/jwt/jwt.hex
+      - --http.addr=0.0.0.0
+      - --http.port=8545
+      - --p2p.port=30303
+      - --discovery.port=30303
+    volumes:
+      - /var/lib/ethereum/execution:/data
+      - jwt:/jwt:ro
+    ports:
+      - "30303:30303/tcp"
+      - "30303:30303/udp"
+      - "127.0.0.1:8545:8545"
+    logging: *logging
+```
+
+</TabItem>
+</Tabs>
+
+{/* Image names, entrypoints and default users inspected in each registry at these tags; flags checked against each client's CLI docs or source at the same release, 2026-09. */}
+
+Pin execution client images to a release tag, as with Prysm, and update them deliberately.
+
+## Start the node
+
+<Steps>
+
+1. Start the execution client and beacon node. The validator stays off while `COMPOSE_PROFILES` is commented out in `.env`:
+
+   ```bash
+   docker compose up -d
+   ```
+
+2. Follow the logs until the beacon node has downloaded its checkpoint and the execution client is syncing:
+
+   ```bash
+   docker compose logs -f beacon execution
+   ```
+
+</Steps>
+
+## Add the validator
+
+<Steps>
+
+1. Create the wallet password file, owned by UID 1001:
+
+   ```bash
+   read -rs -p "Wallet password: " PW && printf '%s' "$PW" | sudo tee /var/lib/ethereum/validator/wallet-password.txt > /dev/null && unset PW
+   sudo chown 1001:1001 /var/lib/ethereum/validator/wallet-password.txt
+   sudo chmod 0600 /var/lib/ethereum/validator/wallet-password.txt
+   ```
+
+2. Import your keystores with a one-off validator container. Replace `<PATH_TO_VALIDATOR_KEYS>` with the folder from the deposit CLI; it must be readable by UID 1001:
+
+   ```bash
+   docker compose run --rm \
+     -v <PATH_TO_VALIDATOR_KEYS>:/keys:ro \
+     validator accounts import \
+     --hoodi \
+     --keys-dir=/keys \
+     --wallet-dir=/data/wallet \
+     --wallet-password-file=/data/wallet-password.txt \
+     --accept-terms-of-use
+   ```
+
+   Use `--mainnet` instead of `--hoodi` on mainnet. `docker compose run` replaces the service's `command`, so this runs `accounts import` instead of the validator.
+
+3. Uncomment `COMPOSE_PROFILES=validator` in `.env` and start the validator. Compose waits for the beacon node to be healthy first:
+
+   ```bash
+   docker compose up -d
+   ```
+
+</Steps>
+
+:::danger[One validator client per key]
+Before starting this validator, make sure no other validator client anywhere is running with the same keys. See [Avoid slashing](/security/avoid-slashing/).
+:::
+
+## Check that it works
+
+```bash
+docker compose ps
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+docker compose logs --tail 50 validator
+```
+
+`docker compose ps` should show `beacon` and `validator` as `healthy`, and `jwt-init` as exited with code 0. See [Check node and validator health](/operate/check-health/).
+
+## Everyday commands
+
+| Task | Command |
+| --- | --- |
+| Follow all logs | `docker compose logs -f` |
+| Last hour of beacon logs | `docker compose logs --since 1h beacon` |
+| Stop everything | `docker compose stop` |
+| Start again | `docker compose up -d` |
+| Restart one service | `docker compose restart beacon` |
+| Remove containers (data stays in `/var/lib/ethereum` and the `jwt` volume) | `docker compose down` |
+
+`docker compose down -v` also deletes the `jwt` volume. That's harmless, because the next `up` creates a new secret and restarts both clients with it, but there's rarely a reason to do it.
+
+## Update
+
+<Steps>
+
+1. Read the release notes, then change `PRYSM_VERSION` in `.env` (or the execution client's image tag in `docker-compose.yml`).
+
+2. Pull the new images while the old ones keep running:
+
+   ```bash
+   docker compose pull
+   ```
+
+3. Recreate the containers, beacon node first:
+
+   ```bash
+   docker compose up -d beacon
+   docker compose up -d
+   ```
+
+   Compose only recreates containers whose image or configuration changed.
+
+</Steps>
+
+See [Update and roll back](/install/update/) for pinning, mandatory updates and rolling back.
+
+## Troubleshooting
+
+**`jwt-init` exits with an error, and nothing else starts**
+Check its output with `docker compose logs jwt-init`. Delete a damaged secret with `docker compose down` and `docker volume rm ethereum_jwt`, then start again.
+
+**`permission denied` in `/data`**
+The host directory doesn't belong to the UID the container runs as. Prysm containers need `1001:1001`; for the execution client, see the note in its tab.
+
+**The beacon node logs errors reaching `http://execution:8551`**
+Check that the execution client is running (`docker compose ps`), listens on `0.0.0.0:8551`, and accepts the `execution` host name (`--authrpc.vhosts=*` for Geth and Erigon, `--engine-host-allowlist=*` for Besu).
+
+**`beacon` stays `unhealthy`**
+The Beacon API returns 503 until the node has a usable state, for example while the checkpoint is still downloading. Check `docker compose logs beacon`; if it's still initializing after the 10-minute start period, the checkpoint URL is probably unreachable.
+
+## Next steps
+
+- [Peers, ports and NAT](/setup/networking/)
+- [Metrics and dashboards](/operate/metrics/)
+- [Update and roll back](/install/update/)

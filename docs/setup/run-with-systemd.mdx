@@ -1,0 +1,263 @@
+---
+title: "Run with systemd [TBR]"
+description: Run the execution client, Prysm beacon node and validator as systemd services on Linux, so they start at boot, restart after a crash and keep their logs under control.
+---
+
+import { Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Running from a terminal is fine for a first test, but a real node must start at boot and restart by itself after a crash. On Linux, systemd does both.
+
+:::note[Linux only]
+systemd isn't available on Windows or macOS. Use [Run with Docker Compose](/setup/run-with-docker-compose/) instead.
+:::
+
+The examples use this layout:
+
+```text
+/usr/local/bin/          # beacon-chain, validator, prysmctl, your execution client
+/var/lib/ethereum/
+├── jwt.hex              # shared by the execution client and beacon node
+├── execution/           # execution client data
+├── beacon/              # beacon node data
+└── validator/           # wallet, wallet-password.txt, slashing protection
+```
+
+## Before you begin
+
+- A working setup you've tried in a terminal: see the [Quickstart](/get-started/quickstart/) and [Connect your execution client](/setup/connect-execution-client/).
+- Prysm's `beacon-chain` and `validator` binaries and your execution client in `/usr/local/bin` (see [Install Prysm](/install/)). Services call the binaries directly, not `prysm.sh`, so nothing updates itself on restart.
+- For the validator: your keystores and an address you control for fees.
+
+## Set up the services
+
+The examples use Geth on Hoodi. For another client, see Other execution clients, at the end of this page.
+
+<Steps>
+
+1. **Create one unprivileged user per process, the data directories and the JWT secret.** Only the execution client and beacon node can read the secret, through a shared `ethereum` group:
+
+	```bash
+	for u in execution beacon validator; do
+	  sudo useradd --system --no-create-home --shell /usr/sbin/nologin $u
+	done
+	sudo install -d -m 0755 /var/lib/ethereum
+	sudo install -d -m 0700 -o execution -g execution /var/lib/ethereum/execution
+	sudo install -d -m 0700 -o beacon -g beacon /var/lib/ethereum/beacon
+	sudo install -d -m 0700 -o validator -g validator /var/lib/ethereum/validator
+	sudo groupadd --system ethereum
+	sudo usermod -aG ethereum execution
+	sudo usermod -aG ethereum beacon
+	openssl rand -hex 32 | tr -d "\n" | sudo tee /var/lib/ethereum/jwt.hex > /dev/null
+	sudo chown root:ethereum /var/lib/ethereum/jwt.hex
+	sudo chmod 0640 /var/lib/ethereum/jwt.hex
+	```
+
+2. **Create the execution client service:**
+
+	{/* Verified against Geth v1.17.6 (flags from cmd/utils/flags.go at the v1.17.6 tag), 2026-09 */}
+
+	```ini title="/etc/systemd/system/execution.service"
+	[Unit]
+	Description=Ethereum execution client
+	Wants=network-online.target
+	After=network-online.target
+
+	[Service]
+	User=execution
+	Group=execution
+	ExecStart=/usr/local/bin/geth \
+	  --hoodi \
+	  --datadir=/var/lib/ethereum/execution \
+	  --authrpc.jwtsecret=/var/lib/ethereum/jwt.hex
+	Restart=on-failure
+	RestartSec=5
+	TimeoutStopSec=600
+	NoNewPrivileges=true
+	ProtectSystem=strict
+	ReadWritePaths=/var/lib/ethereum/execution
+	ProtectHome=true
+	PrivateTmp=true
+
+	[Install]
+	WantedBy=multi-user.target
+	```
+
+3. **Create the beacon node service.** Replace `<YOUR_WALLET_ADDRESS>` with an address you control:
+
+	```ini title="/etc/systemd/system/beacon.service"
+	[Unit]
+	Description=Prysm beacon node
+	Wants=network-online.target execution.service
+	After=network-online.target execution.service
+
+	[Service]
+	User=beacon
+	Group=beacon
+	ExecStart=/usr/local/bin/beacon-chain \
+	  --hoodi \
+	  --datadir=/var/lib/ethereum/beacon \
+	  --execution-endpoint=http://127.0.0.1:8551 \
+	  --jwt-secret=/var/lib/ethereum/jwt.hex \
+	  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+	  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+	  --postpone-shutdown-for-proposals \
+	  --disable-log-colors \
+	  --accept-terms-of-use
+	Restart=on-failure
+	RestartSec=5
+	TimeoutStopSec=900
+	NoNewPrivileges=true
+	ProtectSystem=strict
+	ReadWritePaths=/var/lib/ethereum/beacon
+	ProtectHome=true
+	PrivateTmp=true
+
+	[Install]
+	WantedBy=multi-user.target
+	```
+
+	<Flag name="postpone-shutdown-for-proposals" /> makes a stop or restart wait until no connected validator has a block to propose soon, which can take about 13 minutes; that's why `TimeoutStopSec=900`. <Flag name="accept-terms-of-use" /> is needed because a service can't answer the first-run prompt.
+
+4. **Create the validator's password file and import your keys** as the `validator` user. Replace `<PATH_TO_VALIDATOR_KEYS>` with your keystore folder:
+
+	```bash
+	read -rs -p "Wallet password: " PW && printf '%s' "$PW" | sudo tee /var/lib/ethereum/validator/wallet-password.txt > /dev/null && unset PW
+	sudo chown validator:validator /var/lib/ethereum/validator/wallet-password.txt
+	sudo chmod 0600 /var/lib/ethereum/validator/wallet-password.txt
+	sudo cp -r <PATH_TO_VALIDATOR_KEYS> /var/lib/ethereum/validator/import
+	sudo chown -R validator:validator /var/lib/ethereum/validator/import
+	sudo -u validator /usr/local/bin/validator accounts import \
+	  --hoodi \
+	  --keys-dir=/var/lib/ethereum/validator/import \
+	  --wallet-dir=/var/lib/ethereum/validator/wallet \
+	  --wallet-password-file=/var/lib/ethereum/validator/wallet-password.txt \
+	  --accept-terms-of-use
+	sudo rm -r /var/lib/ethereum/validator/import
+	```
+
+5. **Create the validator service:**
+
+	```ini title="/etc/systemd/system/validator.service"
+	[Unit]
+	Description=Prysm validator client
+	Wants=network-online.target beacon.service
+	After=network-online.target beacon.service
+
+	[Service]
+	User=validator
+	Group=validator
+	ExecStart=/usr/local/bin/validator \
+	  --hoodi \
+	  --datadir=/var/lib/ethereum/validator \
+	  --wallet-dir=/var/lib/ethereum/validator/wallet \
+	  --wallet-password-file=/var/lib/ethereum/validator/wallet-password.txt \
+	  --beacon-rpc-provider=127.0.0.1:4000 \
+	  --suggested-fee-recipient=<YOUR_WALLET_ADDRESS> \
+	  --disable-log-colors \
+	  --accept-terms-of-use
+	Restart=on-failure
+	RestartSec=5
+	TimeoutStopSec=120
+	NoNewPrivileges=true
+	ProtectSystem=strict
+	ReadWritePaths=/var/lib/ethereum/validator
+	ProtectHome=true
+	PrivateTmp=true
+
+	[Install]
+	WantedBy=multi-user.target
+	```
+
+6. **Start the node, then the validator** once the beacon node is synced:
+
+	```bash
+	sudo systemctl daemon-reload
+	sudo systemctl enable --now execution beacon
+	sudo systemctl enable --now validator
+	```
+
+	`enable` starts each service at boot. `Restart=on-failure` restarts it after a crash.
+
+</Steps>
+
+On mainnet, replace `--hoodi` with `--mainnet` in all three units and use a mainnet [checkpoint sync](/setup/checkpoint-sync/) URL. After you edit a unit, run this before restarting it:
+
+```bash
+sudo systemctl daemon-reload
+```
+
+If you move a data directory, update `ReadWritePaths=` too, or the service fails with `read-only file system`.
+
+**Logs.** Each service logs to the journal:
+
+```bash
+journalctl -fu beacon                          # follow the beacon node
+journalctl -u validator --since "1 hour ago"   # the last hour
+journalctl -u beacon -p warning -b             # warnings and errors since boot
+```
+
+The journal rotates by itself. To cap its size, set `SystemMaxUse=2G` in `/etc/systemd/journald.conf` and run:
+
+```bash
+sudo systemctl restart systemd-journald
+```
+
+:::danger[One validator client per key]
+Never run the validator service on two machines, or next to another validator client, with the same keys. Both would sign, and the keys would be slashed.
+:::
+
+Prysm also keeps up to 24 hours of debug logs in `<datadir>/logs/` (at most about 500 MB). To turn that off, add <Flag name="disable-ephemeral-log-file" />.
+
+## Other execution clients
+
+Replace the Geth command with your client's, using `/var/lib/ethereum/execution` and `/var/lib/ethereum/jwt.hex` as the paths. The flags are on [Connect your execution client](/setup/connect-execution-client/).
+
+{/* Verified against Nethermind 2.0.0, Besu 26.9.0, Erigon v3.7.0, Reth v2.7.0 and Ethrex v27.0.0 (CLI docs and images at those tags), 2026-09. */}
+
+| Client | Notes |
+| --- | --- |
+| Nethermind | Ships as a folder: unpack it into `/opt/nethermind` and call `/opt/nethermind/nethermind`. Set `--JsonRpc.EngineHost` and `--JsonRpc.EnginePort` together. |
+| Besu | Ships as a folder: unpack it into `/opt/besu` and call `/opt/besu/bin/besu`. Needs Java 25. |
+| Erigon | Add `--externalcl`. Open port 42069 (TCP and UDP) for its history downloads. |
+| Reth | Add `--full` and `--log.file.directory=/var/lib/ethereum/execution/logs`: its default log location is in a home directory, which the unit blocks. |
+| Ethrex | Data goes in a subfolder named after the network. |
+
+## Check that it works
+
+```bash
+systemctl is-active execution beacon validator
+curl -s http://127.0.0.1:3500/eth/v1/node/syncing
+```
+
+All three services should be `active`. Once the node is synced, `is_syncing` is `false`. Reboot the machine once and run the same commands: everything should come back by itself.
+
+## Troubleshooting
+
+**`status=217/USER`.**
+The `User=` in the unit doesn't exist. Create it as in step 1.
+
+**`permission denied` reading `jwt.hex`.**
+The service user isn't in the `ethereum` group, or the file isn't `root:ethereum 0640`. Test with:
+
+```bash
+sudo -u beacon cat /var/lib/ethereum/jwt.hex
+```
+
+**`permission denied` or `read-only file system` in the data directory.**
+The directory belongs to another user, often after running a binary by hand as root. Fix it:
+
+```bash
+sudo chown -R beacon:beacon /var/lib/ethereum/beacon
+```
+
+Also check that `ReadWritePaths=` in the unit points at the data directory.
+
+**The service restarts in a loop.**
+Read the last error:
+
+```bash
+journalctl -u beacon -n 50 --no-pager
+```
+
+A misspelled or removed flag stops Prysm at startup; compare with the [beacon-chain reference](/reference/cli/beacon-chain/).

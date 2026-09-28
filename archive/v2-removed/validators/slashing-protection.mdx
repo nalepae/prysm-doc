@@ -1,0 +1,160 @@
+---
+title: "Slashing protection history"
+description: "Export and import your validators' signing history in the EIP-3076 interchange format when you move keys between machines or clients, and choose between Prysm's complete and minimal databases."
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The validator client keeps a local record of every block and attestation it has signed, and refuses to sign anything that would conflict with it. That record is your **slashing protection history**. When you move keys to another machine or another client, take the history with you: export it from the old validator in the standard [EIP-3076](https://eips.ethereum.org/EIPS/eip-3076) interchange format and import it into the new one before it starts signing.
+
+## Before you begin
+
+- Know where the old validator keeps its database. By default it's `validator.db` in the validator's <Flag name="datadir" bin="validator" />: `~/.eth2` on Linux, `~/Library/Eth2` on macOS, `%LOCALAPPDATA%\Eth2` on Windows. Older setups may still have it in the wallet, under `<WALLET_DIR>/direct/`. The validator logs the path at startup as `Checking DB databasePath=...`.
+- Stop the validator client before you export or import. The database is locked while it runs.
+
+<Aside type="danger" title="The history only protects you if the old validator never signs again">
+Exporting doesn't disable the old validator. Stop it, make sure it can't restart (disable its service, remove its keys), and only then start the new one. Two validators signing with the same key get it slashed, whatever history they have.
+</Aside>
+
+## When you need this
+
+- **Moving to a new machine.** See [Move to a new machine](/operate/move-to-new-machine/) for the whole procedure.
+- **Switching between Prysm and another client.** Every consensus client reads and writes EIP-3076. See [Switch to or from Prysm](/operate/switch-clients/).
+- **Removing keys through the Keymanager API.** `DELETE /eth/v1/keystores` returns the history for the deleted keys in its response. Save it; it's the same format. See [Manage keys at runtime](/validators/keymanager/).
+- **Rebuilding the validator database** after you deleted or lost it: import the last export you have.
+
+## Export the history
+
+<Steps>
+
+1. **Stop the validator client.**
+
+   ```bash
+   sudo systemctl stop validator   # or stop the process or container you use
+   ```
+
+2. **Run the export.** Point <Flag name="datadir" bin="validator" /> at the folder that contains `validator.db` (Prysm also searches subfolders):
+
+   ```bash
+   ./prysm.sh validator slashing-protection-history export \
+     --hoodi \
+     --datadir=<VALIDATOR_DATADIR> \
+     --slashing-protection-export-dir=<EXPORT_DIR>
+   ```
+
+   If this validator uses the minimal database (see below), add <Flag name="enable-minimal-slashing-protection" bin="validator" />.
+
+3. **Read the result.**
+
+   ```text
+   INFO slashing-protection: Found validator database at path <VALIDATOR_DATADIR>
+   INFO slashing-protection: Writing slashing protection export JSON file to <EXPORT_DIR>/slashing_protection.json
+   INFO slashing-protection: Successfully wrote <EXPORT_DIR>/slashing_protection.json. You can import this file using Prysm's validator slashing-protection-history import command in another machine
+   ```
+
+   If Prysm says `No slashing protection data was found in your database`, you pointed it at the wrong folder, often a fresh `datadir` while the real database is still under the wallet's `direct/` folder. Run the export again with that path.
+
+</Steps>
+
+The file looks like this:
+
+```json title="slashing_protection.json"
+{
+  "metadata": {
+    "interchange_format_version": "5",
+    "genesis_validators_root": "<GENESIS_VALIDATORS_ROOT>"
+  },
+  "data": [
+    {
+      "pubkey": "<VALIDATOR_PUBKEY>",
+      "signed_blocks": [{ "slot": "<SLOT>", "signing_root": "<ROOT>" }],
+      "signed_attestations": [
+        { "source_epoch": "<EPOCH>", "target_epoch": "<EPOCH>", "signing_root": "<ROOT>" }
+      ]
+    }
+  ]
+}
+```
+
+`genesis_validators_root` identifies the network. An import into a validator database from another network fails.
+
+## Import the history
+
+<Steps>
+
+1. **Copy `slashing_protection.json` to the new machine.** It holds no secrets, but check that it's complete: it should list every public key you're moving.
+
+2. **Make sure the new validator client is stopped.**
+
+3. **Run the import** with the <Flag name="datadir" bin="validator" /> the new validator will use:
+
+   ```bash
+   ./prysm.sh validator slashing-protection-history import \
+     --hoodi \
+     --datadir=<VALIDATOR_DATADIR> \
+     --slashing-protection-json-file=<PATH_TO>/slashing_protection.json
+   ```
+
+   Output:
+
+   ```text
+   INFO slashing-protection: Starting import of slashing protection file <PATH_TO>/slashing_protection.json
+   INFO slashing-protection: Slashing protection JSON successfully imported into <VALIDATOR_DATADIR>
+   ```
+
+4. **Start the validator** with the same <Flag name="datadir" bin="validator" />.
+
+</Steps>
+
+Importing adds the file's records to what the database already holds, so you can import several files into one database. If the file itself contains conflicting entries for a key (records that would already be slashable), Prysm imports the rest but blocks that key from performing duties and logs `Not including slashable public key from slashing protection import in request to update validator duties`.
+
+To import history together with keys while the validator runs, pass it in the `slashing_protection` field of `POST /eth/v1/keystores`. See [Manage keys at runtime](/validators/keymanager/).
+
+## Complete and minimal databases
+
+Prysm has two slashing protection databases:
+
+| | Complete (default) | Minimal (experimental) |
+| --- | --- | --- |
+| Enabled by | Default | <Flag name="enable-minimal-slashing-protection" bin="validator" /> |
+| Stores | Every signed block and attestation | Only the latest signed block slot and attestation epochs per key, the minimum EIP-3076 needs |
+| On disk | `<datadir>/validator.db` (one BoltDB file) | `<datadir>/validator-client-data/` (one small file per key) |
+| Grows | Over time; <Flag name="enable-slashing-protection-history-pruning" bin="validator" /> prunes old entries | Stays small |
+
+Both protect you equally against signing a slashable message. The minimal database suits operators with many keys who want a small, simple database.
+
+To switch an existing validator to the minimal database, stop it and convert:
+
+```bash
+./prysm.sh validator db convert-complete-to-minimal \
+  --source-data-dir=<VALIDATOR_DATADIR> \
+  --target-data-dir=<VALIDATOR_DATADIR>
+```
+
+Then remove (or move away) `validator.db` and start the validator with <Flag name="enable-minimal-slashing-protection" bin="validator" />. Prysm refuses to start when both databases exist in the data directory, and keeps using the complete database, with a warning, if you pass the flag while only `validator.db` exists.
+
+To go back, start without the flag: Prysm converts the minimal database to a complete one automatically and logs `Complete slashing protection database requested, while minimal slashing protection database currently used. Converting.`
+
+## Check that it works
+
+- The import ends with `Slashing protection JSON successfully imported into ...`.
+- Export again from the new database and compare: every public key from the original file should be present.
+- After the new validator starts, check that it attests normally. See [Check node and validator health](/operate/check-health/).
+
+## Troubleshooting
+
+**`slashing protection JSON metadata was incorrect`** The file comes from another network, or the new database was already initialized for another network. Check `--hoodi`/`--mainnet` and the `genesis_validators_root` in the file.
+
+**`Both complete ... and minimal slashing ... protection databases exist`** Keep one. If you just converted, move `validator.db` out of the data directory.
+
+**The export is empty.** See step 3 of the export: the database is probably in the legacy `<WALLET_DIR>/direct/` location.
+
+**I lost the history and can't export it.** Stop the old validator and wait at least two epochs (about 13 minutes), then start the new one with <Flag name="enable-doppelganger" bin="validator" />. It checks the network for your keys before signing. This reduces the risk but doesn't replace the history. See [Avoid slashing](/security/avoid-slashing/).
+
+## Next steps
+
+- [Move to a new machine](/operate/move-to-new-machine/)
+- [Switch to or from Prysm](/operate/switch-clients/)
+- [Avoid slashing](/security/avoid-slashing/)
+- [Rewards, penalties and slashing](/learn/rewards-penalties-slashing/)

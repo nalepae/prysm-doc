@@ -1,0 +1,189 @@
+---
+title: Expose APIs safely
+description: Every API Prysm serves, its default address, what it lets a caller do, and how to reach it from another machine without exposing it to the internet.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Every Prysm API listens on `127.0.0.1` by default, and none of the beacon node's APIs require authentication. Keep it that way unless another machine needs access. When one does, reach the API over an SSH tunnel or a VPN, or put an authenticating reverse proxy in front of it. Never bind an API to `0.0.0.0` on a machine with a public IP.
+
+## What Prysm exposes
+
+| API | Default | Enabled | Change with | Authentication |
+| --- | --- | --- | --- | --- |
+| Beacon API (HTTP) | `127.0.0.1:3500` | Always | <Flag name="http-host" />, <Flag name="http-port" /> | None |
+| Beacon node gRPC | `127.0.0.1:4000` | Always | <Flag name="rpc-host" />, <Flag name="rpc-port" /> | None; optional TLS |
+| Beacon node metrics | `127.0.0.1:8080` | Unless <Flag name="disable-monitoring" /> | <Flag name="monitoring-host" />, <Flag name="monitoring-port" /> | None |
+| Validator HTTP (Keymanager API, web UI) | `127.0.0.1:7500` | Only with <Flag name="rpc" bin="validator" /> or <Flag name="web" bin="validator" /> | <Flag name="http-host" bin="validator" />, <Flag name="http-port" bin="validator" /> | Bearer token, for most routes |
+| Validator metrics | `127.0.0.1:8081` | Unless <Flag name="disable-monitoring" bin="validator" /> | <Flag name="monitoring-host" bin="validator" />, <Flag name="monitoring-port" bin="validator" /> | None |
+| pprof profiling | `127.0.0.1:6060` | Only with <Flag name="pprof" /> | <Flag name="pprofaddr" />, <Flag name="pprofport" /> | None |
+
+The validator client also has <Flag name="rpc-host" bin="validator" /> and <Flag name="rpc-port" bin="validator" /> (default `7000`). In current releases the validator client doesn't open a separate gRPC listener; everything it serves goes through its HTTP port.
+
+The execution client's Engine API (usually `8551`) is covered [below](#engine-api-and-the-jwt-secret).
+
+## What each API lets a caller do
+
+**Beacon API (3500).** Read chain data, node identity and peer list. Submit blocks, attestations, exits and other operations to the network. Set proposer preferences: `POST /eth/v1/validator/prepare_beacon_proposer` and `register_validator` change the fee recipient the beacon node uses for a validator until your validator client sends its own again. An attacker who races your validator client can redirect a proposal's fees. The `debug` namespace can return full beacon states, which is expensive; disable it with <Flag name="disable-debug-rpc-endpoints" /> if you don't need it. See the [Beacon API reference](/reference/apis/beacon-api/).
+
+**Beacon node gRPC (4000).** The Prysm API that Prysm validator clients use by default: duties, blocks and attestations to sign, and the same proposer-preference calls. Anyone who can reach it can act as a validator client against your node.
+
+**Validator HTTP (7500).** The [Keymanager API](/reference/apis/keymanager-api/) and Prysm's web API. With the token, a caller can list, import and delete keys (deleting returns the slashing protection history), change fee recipient, gas limit and graffiti, and **sign voluntary exits**. That makes the token as sensitive as control of your validators. A few routes (`/v2/validator/initialize`, `/v2/validator/health/…` including the log streams) don't require the token, so keep the port private even though it has authentication.
+
+**Metrics (8080, 8081).** `/metrics` for Prometheus, plus `/healthz`, a goroutine dump at `/goroutinez`, and on the beacon node a peer list at `/p2p`. Metrics reveal your validator count and, with per-validator metrics, your public keys.
+
+**pprof (6060).** Go's profiler. Collecting a profile is expensive, and heap dumps can contain in-memory data. Enable it only while debugging.
+
+## Reach an API from another machine
+
+Pick the first option that works for you.
+
+### 1. SSH tunnel
+
+Nothing changes on the node. From your laptop:
+
+```bash
+ssh -N -L 3500:127.0.0.1:3500 <USER>@<NODE_HOST>
+```
+
+Then use `http://127.0.0.1:3500` locally. Add more `-L` options for other ports.
+
+### 2. VPN or private network
+
+Put both machines on a VPN (WireGuard, Tailscale) or a private cloud network, bind the API to the private interface only, and allow it through the firewall only from the peer:
+
+```bash
+./prysm.sh beacon-chain \
+  --rpc-host=<PRIVATE_IP> \
+  --http-host=<PRIVATE_IP> \
+  ...
+```
+
+```bash
+sudo ufw allow from <VALIDATOR_PRIVATE_IP> to any port 4000 proto tcp
+sudo ufw allow from <VALIDATOR_PRIVATE_IP> to any port 3500 proto tcp
+```
+
+Replace `<PRIVATE_IP>` with the node's address on the private network, not `0.0.0.0`. This is the usual setup for [a beacon node serving validator clients on other machines](/setup/topologies/multiple-validator-clients/).
+
+### 3. Reverse proxy with authentication
+
+If the API must be reachable over an untrusted network, run a reverse proxy (for example nginx or Caddy) that terminates TLS and enforces access control (mutual TLS, an API key header, or basic auth), and keep Prysm bound to `127.0.0.1` behind it. Prysm has no built-in authentication for the beacon node APIs, so the proxy is the only thing standing between the internet and your node.
+
+A Prysm validator client can pass credentials to such a proxy: <Flag name="beacon-rest-api-headers" bin="validator" /> for the REST connection (with an `https://` URL in <Flag name="beacon-rest-api-provider" bin="validator" />), or <Flag name="grpc-headers" bin="validator" /> for gRPC.
+
+<Aside type="caution" title="Docker and 0.0.0.0">
+Inside a container, Prysm must bind to `0.0.0.0` to be reachable from other containers. That's fine as long as the host doesn't publish the port publicly: use `127.0.0.1:3500:3500` in `ports:`, or no `ports:` entry at all. Docker's port publishing bypasses `ufw`.
+</Aside>
+
+## TLS for the beacon node gRPC API
+
+The beacon node can serve gRPC over TLS with <Flag name="tls-cert" /> and <Flag name="tls-key" />, and the validator client verifies it with <Flag name="tls-cert" bin="validator" />. This encrypts the connection and proves to the validator client that it's talking to your beacon node. It does **not** authenticate the client: anyone who can reach the port can still connect. Combine it with a firewall or VPN. TLS applies to gRPC only; for the HTTP API, use a reverse proxy.
+
+You don't need TLS when the beacon node and validator client run on the same machine.
+
+<Steps>
+
+1. Create a certificate authority:
+
+   ```bash
+   openssl genrsa -out ca.key 4096
+   openssl req -new -x509 -key ca.key -sha256 -subj "/CN=Prysm local CA" -days 365 -out ca.cert
+   ```
+
+2. Create a key and a signing request for the beacon node. List every name and IP the validator client uses to reach it under `[alt_names]`:
+
+   ```ini title="certificate.conf"
+   [req]
+   default_bits = 4096
+   prompt = no
+   default_md = sha256
+   req_extensions = req_ext
+   distinguished_name = dn
+   [dn]
+   CN = <BEACON_HOSTNAME>
+   [req_ext]
+   subjectAltName = @alt_names
+   [alt_names]
+   DNS.1 = <BEACON_HOSTNAME>
+   IP.1 = <BEACON_PRIVATE_IP>
+   ```
+
+   ```bash
+   openssl genrsa -out beacon.key 4096
+   openssl req -new -key beacon.key -out beacon.csr -config certificate.conf
+   openssl x509 -req -in beacon.csr -CA ca.cert -CAkey ca.key -CAcreateserial \
+     -out beacon.pem -days 365 -sha256 -extfile certificate.conf -extensions req_ext
+   ```
+
+3. Start the beacon node with the certificate and key:
+
+   ```bash
+   ./prysm.sh beacon-chain \
+     --tls-cert=beacon.pem \
+     --tls-key=beacon.key \
+     --rpc-host=<BEACON_PRIVATE_IP> \
+     ...
+   ```
+
+4. Start the validator client with the CA certificate:
+
+   ```bash
+   ./prysm.sh validator \
+     --beacon-rpc-provider=<BEACON_HOSTNAME>:4000 \
+     --tls-cert=ca.cert \
+     ...
+   ```
+
+   The validator log shows:
+
+   ```text
+   INFO validator: Established secure gRPC connection
+   ```
+
+   Without TLS, both processes log a warning starting with `You are using an insecure gRPC`.
+
+</Steps>
+
+Keep `ca.key` off the node once you've issued the certificate, and renew before the `-days` period expires.
+
+## The Keymanager API token
+
+When the validator's HTTP server is enabled, Prysm reads the bearer token from <Flag name="keymanager-token-file" bin="validator" /> (default: `auth-token` in the wallet directory), or creates one there on first start with mode `600`. Clients send it as `Authorization: Bearer <TOKEN>`.
+
+- Treat the token file like a key: readable only by the `validator` user and the tools that need it.
+- Rotate it with `validator web generate-auth-token`, or by writing a new token to the file; Prysm watches the file and picks up the change.
+- With <Flag name="web" bin="validator" />, Prysm also logs a login URL containing the token. Protect your logs accordingly.
+- Enable the HTTP server only if you use the Keymanager API or web UI. See [Manage keys at runtime](/validators/keymanager/).
+
+## CORS
+
+<Flag name="http-cors-domain" /> and <Flag name="http-cors-domain" bin="validator" /> list the browser origins allowed to call the APIs from a web page. The defaults are a few `localhost` origins. CORS is enforced by browsers only: it limits which websites can read responses in your browser, and doesn't stop any other client. Narrow the list to origins you actually use, and never add `*`.
+
+## Engine API and the JWT secret
+
+The beacon node talks to the execution client over the Engine API, authenticated with a shared 32-byte secret passed with <Flag name="jwt-secret" />. Anyone with the secret and network access to the Engine API can feed your beacon node payloads and drive the execution client's fork choice.
+
+- Keep the Engine API on `127.0.0.1` or a private network. It never needs to be public.
+- Generate the secret once and give both clients the same file, readable only by them. `beacon-chain generate-auth-secret` or `openssl rand -hex 32 > jwt.hex` both work.
+- Don't reuse the secret across machines.
+- Keep the execution client's general JSON-RPC API (usually `8545`) private too: it isn't JWT-protected by default.
+
+See [Connect an execution client](/setup/connect-execution-client/) and [Harden the host and network](/security/host-and-network/#file-permissions).
+
+## Check that it works
+
+On the node:
+
+```bash
+sudo ss -tlnp | grep -E ':(3500|4000|6060|7500|8080|8081|8551|8545)\b'
+```
+
+Every line should show `127.0.0.1` (or your private IP), not `0.0.0.0` or `*`. From a machine outside your network, `curl http://<PUBLIC_IP>:3500/eth/v1/node/version` should time out.
+
+## Next steps
+
+- [APIs flags](/flags/apis/)
+- [Ports](/reference/ports/)
+- [Trust assumptions](/security/trust-assumptions/)

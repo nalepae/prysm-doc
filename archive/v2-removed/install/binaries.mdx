@@ -1,0 +1,161 @@
+---
+title: Install the release binaries
+description: Download Prysm release binaries from GitHub, verify their SHA-256 checksums and GPG signatures, and install them into /usr/local/bin.
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import PrysmVersion from '@site/src/components/PrysmVersion';
+import PrysmVersionCommand from '@site/src/components/PrysmVersionCommand';
+
+Every Prysm release on [GitHub](https://github.com/OffchainLabs/prysm/releases) includes ready-built binaries for Linux, macOS and Windows, each with a checksum file and a GPG signature. Installing them yourself is the right choice for services: nothing changes until you replace the files. This page shows how to pick the right files, verify them, and install them into `/usr/local/bin`, the location the [systemd guide](/setup/systemd/) expects.
+
+## Before you begin
+
+- `curl`, `sha256sum` (Linux) or `shasum` (macOS), and `gpg`. On macOS, install GnuPG with `brew install gnupg`; on Windows, use [Gpg4win](https://www.gpg4win.org/).
+- The release you want, normally the latest: <PrysmVersion includeLink />. Read its release notes first.
+
+## Asset names
+
+Each program is published as `<program>-<version>-<os>-<arch>`, plus a `.sha256` and a `.sig` file with the same name:
+
+| Program | Linux amd64 | Linux arm64 | macOS Intel | macOS Apple silicon | Windows |
+| --- | --- | --- | --- | --- | --- |
+| Beacon node | `beacon-chain-v7.2.0-linux-amd64` | `beacon-chain-v7.2.0-linux-arm64` | `beacon-chain-v7.2.0-darwin-amd64` | `beacon-chain-v7.2.0-darwin-arm64` | `beacon-chain-v7.2.0-windows-amd64.exe` |
+| Validator | `validator-v7.2.0-linux-amd64` | `validator-v7.2.0-linux-arm64` | `validator-v7.2.0-darwin-amd64` | `validator-v7.2.0-darwin-arm64` | `validator-v7.2.0-windows-amd64.exe` |
+| prysmctl | `prysmctl-v7.2.0-linux-amd64` | `prysmctl-v7.2.0-linux-arm64` | `prysmctl-v7.2.0-darwin-amd64` | `prysmctl-v7.2.0-darwin-arm64` | `prysmctl-v7.2.0-windows-amd64.exe` |
+| client-stats | `client-stats-v7.2.0-linux-amd64` | `client-stats-v7.2.0-linux-arm64` | `client-stats-v7.2.0-darwin-amd64` | `client-stats-v7.2.0-darwin-arm64` | `client-stats-v7.2.0-windows-amd64.exe` |
+
+Linux amd64 also has `beacon-chain-v7.2.0-modern-linux-amd64` (see [Modern and portable builds](#modern-and-portable-builds)). The table shows the names for v7.2.0; other releases follow the same pattern. Each binary is a single, self-contained executable: there's no archive to unpack.
+
+Check your architecture with `uname -m`: `x86_64` means amd64, `aarch64` or `arm64` means arm64.
+
+## Download, verify and install
+
+These steps use Linux amd64. For other platforms, change `OS` and `ARCH`.
+
+<Steps>
+
+1. Set the release and platform, and download the beacon node, validator and prysmctl with their checksum and signature files:
+
+   <PrysmVersionCommand template={`VERSION={version}\nOS=linux\nARCH=amd64\nmkdir -p ~/prysm-download && cd ~/prysm-download\nfor BIN in beacon-chain validator prysmctl; do\n  for EXT in "" .sha256 .sig; do\n    curl -fLO "https://github.com/OffchainLabs/prysm/releases/download/$VERSION/$BIN-$VERSION-$OS-$ARCH$EXT"\n  done\ndone`} />
+
+2. Check the checksums. Use `shasum -a 256 -c` instead of `sha256sum -c` on macOS:
+
+   ```bash
+   sha256sum -c *.sha256
+   ```
+
+   Every file must report `OK`:
+
+   ```text
+   beacon-chain-v7.2.0-linux-amd64: OK
+   prysmctl-v7.2.0-linux-amd64: OK
+   validator-v7.2.0-linux-amd64: OK
+   ```
+
+3. Import the Prysm release signing key, then confirm its fingerprint:
+
+   ```bash
+   curl -fsSL https://prysmaticlabs.com/releases/pgp_keys.asc | gpg --import
+   gpg --list-keys --with-fingerprint 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   ```
+
+   The fingerprint must be `0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E`. The same key and fingerprint are hard-coded in [`prysm.sh`](https://github.com/OffchainLabs/prysm/blob/master/prysm.sh), which gives you a second, independent source to compare against.
+
+4. Check the signatures:
+
+   ```bash
+   for SIG in *.sig; do gpg --verify "$SIG" "${SIG%.sig}"; done
+   ```
+
+   For each file you should see `Good signature` and the same primary key fingerprint:
+
+   ```text
+   gpg:                using RSA key 0AE0051D647BA3C1A917AF4072E33E4DF1A5036E
+   gpg: Good signature from "Preston Van Loon <preston@pvl.dev>" [unknown]
+   ...
+   gpg: WARNING: This key is not certified with a trusted signature!
+   gpg:          There is no indication that the signature belongs to the owner.
+   Primary key fingerprint: 0AE0 051D 647B A3C1 A917  AF40 72E3 3E4D F1A5 036E
+   ```
+
+   The `WARNING` only means you haven't signed the key yourself. `BAD signature`, or a different fingerprint, means stop: don't install the file.
+
+5. Install the binaries under their plain names:
+
+   <PrysmVersionCommand template={`sudo install -m 0755 beacon-chain-{version}-linux-amd64 /usr/local/bin/beacon-chain\nsudo install -m 0755 validator-{version}-linux-amd64 /usr/local/bin/validator\nsudo install -m 0755 prysmctl-{version}-linux-amd64 /usr/local/bin/prysmctl`} />
+
+   `install` copies each file, makes it executable and owned by root, so the unprivileged service users can run but not modify it.
+
+</Steps>
+
+## Verify the download
+
+The steps above are the whole verification. In short, for any file `F`:
+
+```bash
+sha256sum -c F.sha256          # the file matches its published checksum
+gpg --verify F.sig F           # the file was signed by the Prysm release key
+```
+
+Do both. The checksum alone catches corrupted downloads; the signature catches files that were replaced along with their checksum. See [Verify the software you run](/security/verify-software/) for background.
+
+## Modern and portable builds
+
+The beacon node uses the [blst](https://github.com/supranational/blst) library for BLS signatures. The standard builds compile blst in **portable** mode, which runs on any 64-bit CPU. For Linux amd64 only, each release also has a **modern** beacon node build (`beacon-chain-<version>-modern-linux-amd64`) that compiles blst without portable mode, so it uses the ADX instructions found in most x86-64 CPUs from the last decade and verifies signatures faster.
+
+Use the modern build only if your CPU supports ADX. On Linux, this prints `adx` if it does:
+
+```bash
+grep -o -m1 adx /proc/cpuinfo
+```
+
+If it prints nothing, use the standard build: the modern one would crash with an illegal instruction error. With `prysm.sh`, set `USE_PRYSM_MODERN=true` to get the modern build. There is no modern build of the validator or the other programs.
+
+## Other platforms
+
+<Tabs syncKey="os">
+<TabItem label="Linux, macOS">
+
+On macOS, `/usr/local/bin` works the same way. Files downloaded with `curl` run directly. If you downloaded them in a browser, macOS quarantines them and refuses to open them. Remove the quarantine flag after you've verified them:
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/beacon-chain /usr/local/bin/validator /usr/local/bin/prysmctl
+```
+
+</TabItem>
+<TabItem label="Windows">
+
+Download the `.exe`, `.exe.sha256` and `.exe.sig` files from the release page. Check the checksum in PowerShell and compare the result with the first word of the `.sha256` file:
+
+```powershell
+Get-FileHash .\beacon-chain-v7.2.0-windows-amd64.exe -Algorithm SHA256
+Get-Content .\beacon-chain-v7.2.0-windows-amd64.exe.sha256
+```
+
+Check the signature with Gpg4win's `gpg.exe`, using the same commands as on Linux. Keep the binaries in a folder such as `C:\ethereum\bin`. See [Windows](/install/windows/) for running them as a service.
+
+</TabItem>
+</Tabs>
+
+## Check that it works
+
+```bash
+beacon-chain --version
+validator --version
+prysmctl --help
+```
+
+The first two should report the release you installed, and `prysmctl --help` should list its commands (prysmctl has no `--version` flag):
+
+```text
+beacon-chain version Prysm/v7.2.0/03f3712a184c1c7cc9fd38d3b1abc5328934cdef. Built at: 2026-09-25 15:43:49+00:00
+```
+
+The commit hash matches the release tag on GitHub.
+
+## Next steps
+
+- [Run with systemd](/setup/systemd/)
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Update and roll back](/install/update/)

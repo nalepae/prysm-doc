@@ -1,0 +1,71 @@
+---
+title: Build Prysm from source
+description: Build release-grade Prysm binaries from a tagged release with Bazel, for operators who want to run exactly the code they've read.
+---
+
+import { Steps } from '@site/src/components/ui';
+import PrysmVersionCommand from '@site/src/components/PrysmVersionCommand';
+
+Building from source lets you run exactly the code you've reviewed, or apply a patch. Prysm builds with [Bazel](https://bazel.build/), which fetches the right Go toolchain and every dependency itself, so the only thing you install is Bazelisk. This page is the short path for operators: build a tagged release and install it. For build options, cross-compiling and development builds, see [Build with Bazel](/developers/build/).
+
+Most operators don't need this. The [release binaries](/install/binaries/) are built from the same tags and signed.
+
+## Before you begin
+
+- Linux or macOS, 64-bit, with `git` and a C toolchain (on macOS, the Xcode Command Line Tools: `xcode-select --install`).
+- [Bazelisk](https://github.com/bazelbuild/bazelisk/releases), installed as `bazel` on your `PATH`. It reads `.bazelversion` in the repository and downloads the Bazel version Prysm expects.
+- Several GB of free disk space and memory for the first build, which downloads and compiles a lot. Later builds are incremental.
+
+## Build a release
+
+<Steps>
+
+1. Clone the repository and check out the release tag you want:
+
+   <PrysmVersionCommand template={`git clone https://github.com/OffchainLabs/prysm.git\ncd prysm\ngit checkout {version}`} />
+
+   Never build a node you depend on from the default branch. It's where development happens, and it isn't a release.
+
+2. Build the programs with the release configuration (optimized, stripped, and stamped with the version and commit):
+
+   ```bash
+   bazel build --config=release //cmd/beacon-chain //cmd/validator //cmd/prysmctl
+   ```
+
+   On Linux x86-64 with a CPU that supports ADX, you can add `--define=blst_modern=true` to get the equivalent of the [modern build](/install/binaries/#modern-and-portable-builds).
+
+3. Install the binaries:
+
+   ```bash
+   sudo install -m 0755 bazel-bin/cmd/beacon-chain/beacon-chain_/beacon-chain /usr/local/bin/beacon-chain
+   sudo install -m 0755 bazel-bin/cmd/validator/validator_/validator /usr/local/bin/validator
+   sudo install -m 0755 bazel-bin/cmd/prysmctl/prysmctl_/prysmctl /usr/local/bin/prysmctl
+   ```
+
+</Steps>
+
+## Check that it works
+
+```bash
+beacon-chain --version
+```
+
+The output names the tag and the commit you built, for example `beacon-chain version Prysm/v7.2.0/03f3712a184c1c7cc9fd38d3b1abc5328934cdef. ...`. Compare the commit with the tag on [GitHub](https://github.com/OffchainLabs/prysm/releases). If the tag is missing, you built without `--config=release`, which is what stamps the version into the binary.
+
+## Update
+
+Fetch, check out the new tag, and build again:
+
+```bash
+git fetch --tags
+git checkout <NEW_TAG>
+bazel build --config=release //cmd/beacon-chain //cmd/validator //cmd/prysmctl
+```
+
+Then install the new binaries and restart the services as described in [Update and roll back](/install/update/).
+
+## Next steps
+
+- [Build with Bazel](/developers/build/) for all build options
+- [Run with systemd](/setup/systemd/)
+- [Connect an execution client](/setup/connect-execution-client/)

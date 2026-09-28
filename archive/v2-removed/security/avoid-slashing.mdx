@@ -1,0 +1,108 @@
+---
+title: Avoid slashing
+description: The specific mistakes that get validators slashed, what Prysm's slashing protection and doppelganger check do and don't catch, and how to move keys safely.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Honest operators get slashed almost exclusively for one reason: **the same validator key signed messages from two places**. Prysm's slashing protection stops a single validator client from contradicting itself, but it can't see what another copy of your key is doing. The rest of this page is about never creating that second copy.
+
+## What is and isn't slashable
+
+A validator is slashed for exactly three kinds of signed message ([consensus specs](https://github.com/ethereum/consensus-specs/blob/master/specs/phase0/beacon-chain.md#is_slashable_attestation_data)):
+
+- **Double proposal:** two different blocks for the same slot.
+- **Double vote:** two different attestations with the same target epoch.
+- **Surround vote:** an attestation whose source and target surround, or are surrounded by, one you signed earlier.
+
+These are **not** slashable:
+
+- Being offline, for any length of time. You lose rewards and pay small penalties (larger during an inactivity leak), but you aren't slashed.
+- A wrong system clock. It makes you miss or mistime duties; it doesn't make you sign conflicting messages on its own.
+- Signing the exact same message twice, such as after a restart.
+- Sync committee messages.
+- Missing a proposal, or proposing a block that gets orphaned.
+
+What slashing costs on mainnet: a small initial penalty (1/4096 of the effective balance), a forced exit, about 36 days (8192 epochs) before the balance becomes withdrawable, and a correlation penalty that grows with how many other validators were slashed around the same time. See [Rewards, penalties and slashing](/learn/rewards-penalties-slashing/).
+
+## How operators actually get slashed
+
+- **Migrating without stopping the old machine.** The new validator client starts while the old one is still running, or the old one comes back after a reboot because its service was still enabled.
+- **"Redundant" or failover validator clients.** Two validator clients with the same keys, or a watchdog that starts a standby when it *thinks* the primary is down. Network partitions make "down" impossible to judge reliably.
+- **Cloud and VM snapshots.** Restoring or cloning a VM image that contains the validator, while the original still runs. Autoscaling groups and container orchestrators restarting a "missing" validator somewhere else.
+- **Restoring an old backup without its latest slashing protection history,** then starting it right after the old client stopped.
+- **Importing the same keys into two clients**, for example Prysm and another client during a client switch, or two remote signer setups that don't share a slashing protection database.
+- **Re-using keys from a staking service** that is still running them.
+
+Accept downtime instead. A migration that takes an hour costs a few hours of rewards. A slashing costs far more.
+
+## Prysm's slashing protection database
+
+The validator client records every block and attestation it signs, in its database under <Flag name="datadir" bin="validator" /> (older setups may still have it in the wallet directory, and Prysm keeps using it there), and refuses to sign anything that would conflict with that history. It follows the [EIP-3076](https://eips.ethereum.org/EIPS/eip-3076) rules. By default Prysm keeps the complete history; <Flag name="enable-minimal-slashing-protection" bin="validator" /> keeps only the minimal data EIP-3076 requires (the highest source and target epochs and the highest proposed slot per key), which is smaller and still safe.
+
+It protects against:
+
+- Bugs or bad data from the beacon node that would make this validator client sign a conflicting message.
+- Restarts: the history survives, so a restart never re-signs a conflicting message.
+
+It does **not** protect against:
+
+- **Another validator client** using the same keys with its own database. Neither can see the other's history.
+- **A deleted, replaced or older database.** An empty database allows anything. That includes a database wiped with <Flag name="clear-db" bin="validator" /> or <Flag name="force-clear-db" bin="validator" />. An old one only knows what was signed up to its backup time.
+- **Copying the database while the source client is still running.** The copy is out of date the moment the source signs again.
+
+When you move keys, you move the history with them: export it with `validator slashing-protection-history export`, import it on the new machine, and never run both. See [Slashing protection history](/validators/slashing-protection/).
+
+If an imported history file contains slashable data for a key, Prysm marks that key and won't perform duties with it.
+
+## Doppelganger protection
+
+<Flag name="enable-doppelganger" bin="validator" /> makes the validator client check the network for another active copy of its keys before it starts validating. It's off by default. Turn it on for every validator client unless you have a specific reason not to.
+
+What it does, precisely:
+
+1. At startup, after the beacon node is synced, the validator client asks the beacon node whether each of its validators participated in roughly the **last two to three epochs** (the beacon node reads participation from its head state and the state one epoch earlier).
+2. Keys whose own slashing protection history shows an attestation within the last two epochs are **skipped**: the client assumes it's the one that signed them, as after a quick restart.
+3. If any other key shows participation, the validator client refuses to start and reports `Duplicate instances exists in the network for validator keys: …`.
+4. Keys added while the client is running (through the [Keymanager API](/validators/keymanager/) or a remote signer's key list) are held out of duties for at least two epochs and checked each epoch before they start signing. The log reports `Reloaded keys held out of duties pending doppelganger check`.
+
+What it doesn't catch:
+
+- **A copy that was offline during the check window** and comes online later. Keys that passed the startup check aren't re-checked, so only the second client to start (if it also has doppelganger enabled) can notice the first.
+- **A copy you started with a fresh copy of a running client's database.** The recent history makes the check skip those keys.
+- **A copy whose attestations weren't included** on chain during the window, for example because it's badly connected.
+
+Doppelganger protection is a last line of defense against honest mistakes. It doesn't make running two copies safe. A side effect is useful: with it enabled, a new validator client refuses to start until the old one has been silent for a few epochs, which enforces the waiting step of a migration.
+
+## Move keys without getting slashed
+
+The full procedure is in [Move to a new machine](/operate/move-to-new-machine/). The safety-critical steps are:
+
+<Steps>
+
+1. Stop the old validator client **and disable its service** so it can't restart (`systemctl disable --now`, or remove the container's restart policy).
+2. Remove the keys from the old machine, or make them unreadable, so nothing can restart with them by accident.
+3. Export the slashing protection history from the old machine **after** it stopped, and import it on the new one.
+4. Wait until the old client has been stopped for at least two full epochs (about 13 minutes). Confirm on a [block explorer](/resources/block-explorers/) that your validators are missing attestations.
+5. Start the new validator client with <Flag name="enable-doppelganger" bin="validator" />.
+
+</Steps>
+
+If you can't get the old machine's history (it died, or you're restoring from an old backup), the waiting step is what keeps you safe: wait until the old client has certainly been offline for several epochs before starting.
+
+<Aside type="danger" title="Never run a key in two places, even briefly">
+There is no safe overlap. Two validator clients with the same keys can produce a slashable pair of attestations within one epoch.
+</Aside>
+
+## The slasher's role
+
+A slasher watches the network for slashable messages from *any* validator and submits proof so the offender is slashed. Run one in the beacon node with <Flag name="slasher" />; see [Run a slasher](/operate/slasher/).
+
+A slasher doesn't protect your own validators. It helps the network punish misbehavior, and would report your validators too if they double-signed. Running one is optional and costs extra disk and memory.
+
+## Next steps
+
+- [Move to a new machine](/operate/move-to-new-machine/)
+- [Slashing protection history](/validators/slashing-protection/)
+- [Switch to or from Prysm](/operate/switch-clients/)

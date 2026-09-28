@@ -1,0 +1,187 @@
+---
+title: Spec tests
+description: Run the Ethereum consensus spec test vectors against Prysm with Bazel, choose mainnet, minimal or general tests, run a subset, use local or nightly vectors, and move to a new spec version.
+---
+
+import { Aside, Steps } from '@site/src/components/ui';
+
+The consensus specification comes with test vectors: pre-states, blocks and expected post-states for every part of the state transition, fork choice, SSZ types, BLS and KZG. Prysm runs them in `testing/spectest/` to prove it follows the spec. Run them when you change consensus logic, and every time the spec version changes.
+
+## Before you begin
+
+- [Set up your environment](/developers/environment/).
+- A network connection for the first run, which downloads the test vectors from the [consensus-specs releases](https://github.com/ethereum/consensus-specs/releases).
+
+## How the tests are organized
+
+| Directory | Target | Contents |
+| --- | --- | --- |
+| `testing/spectest/mainnet/` | `//testing/spectest/mainnet:go_default_test` | Tests that use the mainnet preset, phase 0 to Fulu. |
+| `testing/spectest/mainnet/gloas/` | `//testing/spectest/mainnet/gloas:go_default_test` | Mainnet-preset Gloas tests. |
+| `testing/spectest/minimal/` | `//testing/spectest/minimal:go_default_test` | Tests that use the minimal preset (built with `eth_network = "minimal"`). |
+| `testing/spectest/minimal/gloas/` | `//testing/spectest/minimal/gloas:go_default_test` | Minimal-preset Gloas tests. |
+| `testing/spectest/general/` | `//testing/spectest/general:go_default_test` | Preset-independent tests, such as KZG. |
+| `testing/spectest/shared/<fork>/` | | The test runners, shared by the mainnet and minimal targets. |
+| `testing/spectest/utils/` | | Helpers that locate and filter test cases. |
+
+Each test file is named `<fork>__<runner>__<handler>_test.go`, after the path of the vectors it runs. For example, `mainnet/altair__sanity__blocks_test.go` runs `tests/mainnet/altair/sanity/blocks/pyspec_tests` through the runner in `shared/altair/sanity`:
+
+```go title="testing/spectest/mainnet/altair__sanity__blocks_test.go"
+func TestMainnet_Altair_Sanity_Blocks(t *testing.T) {
+	sanity.RunBlockProcessingTest(t, "mainnet", "sanity/blocks/pyspec_tests")
+}
+```
+
+All spec test targets are tagged `spectest`.
+
+## Where the vectors come from
+
+`WORKSPACE` pins the spec version and the hash of each vector archive:
+
+```text title="WORKSPACE"
+consensus_spec_version = "v1.7.0-beta.0"
+
+consensus_spec_tests(
+    name = "consensus_spec_tests",
+    flavors = {
+        "general": "sha256-…",
+        "minimal": "sha256-…",
+        "mainnet": "sha256-…",
+    },
+    version = consensus_spec_version,
+)
+```
+
+The `consensus_spec_tests` repository rule (`tools/download_spectests.bzl`) downloads `general.tar.gz`, `minimal.tar.gz` and `mainnet.tar.gz` from that release, checks the hashes, and exposes them as `@consensus_spec_tests//:test_data`. The download happens once; Bazel caches it until the version or hashes change.
+
+`WORKSPACE` also pins the spec source itself (`@consensus_spec`, used by tests that read spec YAML), the BLS vectors (`@bls_spec_tests`) and the cryptography spec vectors (`@cryptography_spec_tests`).
+
+## Run spec tests
+
+| What | Command |
+| --- | --- |
+| Every spec test | `bazel test //... --test_tag_filters=spectest` |
+| Mainnet preset, phase 0 to Fulu | `bazel test //testing/spectest/mainnet:go_default_test` |
+| Minimal preset, phase 0 to Fulu | `bazel test //testing/spectest/minimal:go_default_test` |
+| Gloas only | `bazel test //testing/spectest/mainnet/gloas:go_default_test //testing/spectest/minimal/gloas:go_default_test` |
+| One handler | `bazel test //testing/spectest/mainnet:go_default_test --test_filter='TestMainnet_Deneb_Sanity_Blocks'` |
+
+Test function names follow the file names (`TestMainnet_<Fork>_<Runner>_<Handler>`), so a `--test_filter` regular expression selects by fork or runner. For example, `--test_filter='TestMinimal_Electra_'` runs every minimal-preset Electra test. Individual cases are subtests named after the case directory, so you can go one level deeper:
+
+```bash
+bazel test //testing/spectest/minimal:go_default_test \
+  --test_filter='TestMinimal_Electra_Operations_Deposit/<CASE_NAME>' \
+  --test_output=streamed
+```
+
+Replace `<CASE_NAME>` with the directory name of the case in the vectors.
+
+## Test with the fake BLS backend
+
+Some vectors are marked `bls_setting: 2` ("BLS ignored") and carry a placeholder signature that a real BLS library rejects. `utils.TestFolders` reads each case's `meta.yaml` and runs only the cases that suit the compiled-in backend:
+
+| `bls_setting` | Real BLS | `fake_crypto` build |
+| --- | --- | --- |
+| absent or `0` | run | run |
+| `1` | run | skipped |
+| `2` | skipped | run |
+
+To run the cases the real backend skips, build the spec tests with the `fake_crypto` tag:
+
+```bash
+bazel test //testing/spectest/mainnet:go_default_test --@io_bazel_rules_go//go/config:tags=fake_crypto
+bazel test //testing/spectest/minimal:go_default_test --@io_bazel_rules_go//go/config:tags=fake_crypto
+```
+
+<Aside type="caution">
+Use `fake_crypto` only with the spec test targets. It makes every signature valid, so unit tests that check invalid signatures are meaningless under it. `cmd/beacon-chain`, `cmd/validator` and `cmd/prysmctl` deliberately fail to compile with the tag.
+</Aside>
+
+## Use other vectors
+
+You can point the repository rule at other vectors with `--repo_env`. All paths must be absolute.
+
+| Setting | Effect |
+| --- | --- |
+| `--repo_env=CONSENSUS_SPEC_TESTS_VERSION=nightly` | Downloads the latest nightly vectors from the consensus-specs CI. Needs a `GITHUB_TOKEN` environment variable (a classic token from any account works). |
+| `--repo_env=CONSENSUS_SPEC_TESTS_VERSION=nightly-<RUN_ID>` | Downloads the nightly vectors of a specific CI run. Also needs `GITHUB_TOKEN`. |
+| `--repo_env=CONSENSUS_SPEC_TESTS_DIR=<DIR>` | Uses vectors from disk. For each flavor, Bazel looks for `<DIR>/<flavor>.tar.gz`, then `<DIR>/tests/<flavor>/`, then `<DIR>/<flavor>/`. No network needed. |
+| `--repo_env=CONSENSUS_SPEC_TESTS_MAINNET=<PATH>` | Uses one tarball or unpacked tree for one flavor. Also `…_MINIMAL` and `…_GENERAL`. Overrides the directory setting for that flavor. |
+
+For example, to run the mainnet tests against vectors you generated yourself:
+
+```bash
+bazel test //testing/spectest/mainnet:go_default_test \
+  --repo_env=CONSENSUS_SPEC_TESTS_MAINNET=/abs/path/to/mainnet.tar.gz
+```
+
+When you supply only some flavors, test only the matching targets, because the other flavors' data is empty. Bazel keys the download on the value of the variable, not on the files. If you change the files at the same path, run `bazel sync --configure` to force a re-read.
+
+## Find tests Prysm doesn't run yet
+
+`hack/spectest-report.sh` runs every spec test with a report directory set, clones the [consensus-spec-tests](https://github.com/ethereum/consensus-spec-tests) repository into `/tmp`, and lists the vector directories no test used. Directories that Prysm skips on purpose are listed in `testing/spectest/exclusions.txt`.
+
+## Update to a new spec version
+
+<Steps>
+
+1. Change `consensus_spec_version` in `WORKSPACE` to the new release tag.
+
+2. Update the hashes. The `flavors` values are subresource integrity strings (`sha256-` followed by the base64 digest). Compute one per archive of the new release:
+
+   ```bash
+   VERSION=<NEW_VERSION>
+   for flavor in general minimal mainnet; do
+     printf '%s: sha256-' "$flavor"
+     curl -sL "https://github.com/ethereum/consensus-specs/releases/download/$VERSION/$flavor.tar.gz" \
+       | openssl dgst -sha256 -binary | openssl base64 -A
+     echo
+   done
+   ```
+
+   Replace `<NEW_VERSION>` with the tag, for example `v1.7.0-beta.1`. Update the `integrity` of the `@consensus_spec` source archive the same way, using `https://github.com/ethereum/consensus-specs/archive/refs/tags/$VERSION.tar.gz`.
+
+3. Update the version in `.ethspecify.yml` too. The `check-specrefs` workflow fails if it differs from `WORKSPACE`. Then run [`ethspecify`](https://github.com/jtraglia/ethspecify) to refresh the spec references in `specrefs/`, as described in `specrefs/README.md`, and implement what changed.
+
+4. Add test files for new handlers, following the naming convention, and run Gazelle:
+
+   ```bash
+   bazel run //:gazelle -- fix
+   ```
+
+5. Regenerate the SSZ spec test package. `hack/update-go-spectest.sh` builds every `ssz_gen_spectest` target (the generator config is `testing/spectest/methodical-spectest.yaml`) and copies the generated `methodical_test.go` and its `testdata/` fixtures back into the source tree:
+
+   ```bash
+   ./hack/update-go-spectest.sh
+   bazel run //:gazelle -- fix
+   ```
+
+6. Run everything and fix the failures:
+
+   ```bash
+   bazel test //... --test_tag_filters=spectest
+   ```
+
+</Steps>
+
+## Check that it works
+
+```bash
+bazel test //... --test_tag_filters=spectest
+```
+
+Every target reports `PASSED`. A handler whose vectors all use a BLS setting the backend can't run is reported as skipped in the log (`None of the … cases at … suit this backend`), not failed.
+
+## Troubleshooting
+
+**`Error GITHUB_TOKEN is not set`.** You asked for nightly vectors. Export a GitHub token as `GITHUB_TOKEN` before running Bazel.
+
+**A new test fails with `no such file or directory` for its vectors.** The folder path passed to the runner doesn't match the vector layout, or the handler doesn't exist for that fork. Compare with the directories in the downloaded archive under `$(bazel info output_base)/external/consensus_spec_tests`.
+
+**Tests pass locally but CI uses different vectors.** Check that you didn't leave a `--repo_env` setting in `~/.bazelrc`.
+
+## Next steps
+
+- [Unit tests](/developers/unit-tests/)
+- [End-to-end tests](/developers/e2e-tests/)
+- [Generated code](/developers/code-generation/)

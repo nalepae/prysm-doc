@@ -1,0 +1,50 @@
+---
+title: "Beacon node only [TBR]"
+description: "Run a Prysm beacon node on its own to serve apps, explorers, rollup nodes or other machines, and expose its APIs safely."
+---
+
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+A beacon node can run on its own, to follow the chain and serve its data to an app, an explorer, a rollup node or other machines on your network.
+
+## Start the beacon node
+
+<TopologyDiagram variant="beacon-only" />
+
+Start it as usual. Depending on what it serves, add:
+
+| You need | Add |
+| --- | --- |
+| Current head, recent blocks and chain state | Nothing |
+| Full blob data, for a rollup or L2 node | <Flag name="semi-supernode" /> or <Flag name="supernode" /> (more disk and bandwidth; see [Disk space and archive nodes](/setup/storage/)) |
+| Old blocks or historical states | Archive settings, see [Disk space and archive nodes](/setup/storage/) |
+| Access from other machines | <Flag name="http-host" /> (Beacon API, port 3500) or <Flag name="rpc-host" /> (gRPC, port 4000) set to the node's private IP |
+| Browser apps calling the API | <Flag name="http-cors-domain" /> with your app's origin |
+
+For example, to let other machines on your local network connect:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --jwt-secret=../jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+  --rpc-host=<PRIVATE_IP> \
+  --http-host=<PRIVATE_IP>
+```
+
+Replace `<PRIVATE_IP>` with the beacon node's LAN address, for example `192.168.1.10`, and firewall ports 3500 and 4000 to the hosts that need them.
+
+:::caution
+Never expose ports 3500 or 4000 to the internet. The APIs have no authentication and some endpoints change the node's state. If apps outside your network need the API, put a reverse proxy with TLS and access control in front of it.
+:::
+
+## Check that it works
+
+From another machine on your network, run:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" http://<PRIVATE_IP>:3500/eth/v1/node/health
+```
+
+It prints `200` once the node is synced (`206` while it syncs).

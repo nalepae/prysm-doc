@@ -1,0 +1,189 @@
+---
+title: Sync and storage
+description: Beacon node flags for checkpoint and genesis sync, backfill, the data directory, blob and data column storage, supernodes, pruning, archive nodes, database restore and the slasher.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+These flags decide where the beacon node starts syncing from, how much history it keeps, and where it stores it. A typical staking node needs only <Flag name="checkpoint-sync-url" /> and <Flag name="datadir" />. The rest matter when you serve data to others (blobs, history) or want to save disk. For the concepts, read [How syncing works](/learn/syncing/) and [Blobs and PeerDAS](/learn/blobs-and-peerdas/).
+
+## Checkpoint sync
+
+Checkpoint sync starts the node from a recent finalized state instead of genesis, so it's ready in minutes. Point <Flag name="checkpoint-sync-url" /> at a synced beacon node's Beacon API that you trust:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --datadir=$HOME/ethereum/consensus/beacon \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+For mainnet, replace `--hoodi` and the URL with `--mainnet` and a mainnet provider.
+
+The node downloads the finalized state and its block and logs, in order, `Checkpoint sync - Downloading origin state and block`, `Detected supported config in remote finalized state` and `Downloaded checkpoint sync state and block.` The same URL also provides the genesis state on testnets.
+
+Things to know:
+
+- **It only applies to an empty database.** Once the node has data, the flags are ignored and the log says `Origin checkpoint found in the database, ignoring checkpoint sync flags`. You can leave the flag in your service file.
+- **From files instead of a URL.** Download a state and block with `prysmctl checkpoint-sync download --beacon-node-host=<URL>`, which saves files named like `state_<network>_<fork>_<slot>-<root>.ssz`, then pass both with <Flag name="checkpoint-state" /> and <Flag name="checkpoint-block" />. Both are required; if `--checkpoint-sync-url` is also set, the URL wins.
+- **Verify the checkpoint.** You trust the provider to give you the canonical chain. <Flag name="weak-subjectivity-checkpoint" /> takes `<BLOCK_ROOT>:<EPOCH>` from a second source (for example `prysmctl weak-subjectivity checkpoint --beacon-node-host=<OTHER_URL>`, which prints the flag ready to paste). Once the node finalizes past that epoch it logs `Weak subjectivity check has passed!!`, or exits with `Could not verify weak subjectivity checkpoint`.
+
+A checkpoint-synced node has no blocks older than the checkpoint until you turn on [backfill](#backfill). The step-by-step guide is [Checkpoint sync](/setup/checkpoint-sync/).
+
+## Genesis sync
+
+Without a checkpoint flag the node syncs from genesis, which takes much longer. It needs the genesis state:
+
+- **Mainnet:** built into Prysm; nothing to add.
+- **Testnets and devnets:** use <Flag name="genesis-state" /> with a local SSZ file, or <Flag name="genesis-beacon-api-url" /> to fetch it from a Beacon API. `--genesis-state` takes priority.
+
+When you use checkpoint sync, `--genesis-beacon-api-url` defaults to the checkpoint URL (the node logs `Using checkpoint sync url … for value in --genesis-beacon-api-url flag`), so you don't set it. The genesis state is saved in the data directory as `genesis-<time>-<root>.ssz` and reused on later starts.
+
+## Backfill
+
+After checkpoint sync, <Flag name="enable-backfill" /> downloads older blocks in the background, plus the blobs and data columns still inside their retention window, so your node can serve them to peers and answer API queries for them. It does nothing on a node synced from genesis (`Node synced from genesis, shutting down backfill`) and logs `Marked as complete` when done.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="enable-backfill" /> | off | Turn backfill on |
+| <Flag name="backfill-oldest-slot" /> | spec minimum | Go further back than `MIN_EPOCHS_FOR_BLOCK_REQUESTS` (33024 epochs, about 5 months); `1` means full history |
+| <Flag name="backfill-batch-size" /> | 32 | Blocks per request |
+| <Flag name="backfill-worker-count" /> | 2 | Parallel requests |
+
+Memory grows with batch size times worker count, so raise them together only if you have RAM to spare.
+
+```bash
+# Full block history on a checkpoint-synced node
+--checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+--enable-backfill \
+--backfill-oldest-slot=1
+```
+
+## Data directory
+
+<Flag name="datadir" /> is the root of everything the beacon node stores:
+
+```text
+<datadir>/
+├── beaconchaindata/beaconchain.db   # blocks, states, fork choice
+├── blobs/                           # blob sidecars (Deneb, Electra)
+├── data-columns/                    # PeerDAS data columns (Fulu onward)
+├── network-keys                     # P2P identity
+├── genesis-<time>-<root>.ssz        # saved genesis state
+├── tosaccepted                      # terms of use accepted
+└── logs/beacon-chain.log            # debug log, kept one day
+```
+
+Use one data directory per network. The database stores the deposit contract address, and starting it on a network with a different address fails with `database contract is … but tried to run with …`. Mainnet and Hoodi use the same address, so don't rely on this check to catch a mix-up between them.
+
+To start over, <Flag name="clear-db" /> asks for confirmation and then deletes the beacon database, the saved genesis state, blob and data column storage, and the slasher database if <Flag name="slasher" /> is set. <Flag name="force-clear-db" /> does the same without asking, for non-interactive services.
+
+<Aside type="caution">
+Remove `--force-clear-db` after the run you needed it for. Left in a service file, it wipes the database and resyncs on every restart.
+</Aside>
+
+## Blobs and data columns
+
+Blob data is short-lived. Since Fulu it is stored as data columns (PeerDAS); blobs from Deneb and Electra blocks are stored as blob sidecars.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| <Flag name="blob-retention-epochs" /> | 4096 (about 18 days) | How long blobs **and** data columns are kept. Lower values stop the node at startup |
+| <Flag name="blob-path" /> | `<datadir>/blobs` | Blob sidecar directory |
+| <Flag name="data-column-path" /> | `<datadir>/data-columns` | Data column directory |
+| <Flag name="blob-storage-layout" /> | detected, else `by-epoch` | On-disk layout; `flat` is the old layout |
+| <Flag name="blob-save-fsync" /> | off | `fsync` each blob file before it counts as stored |
+
+Old blobs and columns are pruned automatically, with or without [database pruning](#pruning). There is no separate retention flag for data columns.
+
+To keep blob data on a cheaper or bigger disk than the database:
+
+```bash
+--blob-path=/mnt/bulk/prysm/blobs \
+--data-column-path=/mnt/bulk/prysm/data-columns
+```
+
+If the node warns that your blob directory uses the `flat` layout, start it once with `--blob-storage-layout=by-epoch` to migrate.
+
+## Supernodes
+
+From Fulu, each node stores (custodies) only some of the 128 data column groups: a minimum set derived from its node ID, more if it has attached validators. That's enough to take part in the network, but not to return every blob through the Beacon API.
+
+| Mode | Flag | Custody | Use it for |
+| --- | --- | --- | --- |
+| Default | none | Minimum for your validators | Staking nodes |
+| Semi-supernode | <Flag name="semi-supernode" /> | 64 of 128 groups, enough to reconstruct all blobs | Serving the blob and blob sidecar Beacon API endpoints at about half a supernode's storage |
+| Supernode | <Flag name="supernode" /> | All 128 groups | RPC providers, rollup nodes, anything serving full blob data to others |
+
+At startup the node logs `Operating in supernode mode` or `Operating in semi-supernode mode (…)`. Passing both flags fails with `cannot set both --supernode and --semi-supernode flags; choose one mode`. Both modes need much more disk and bandwidth than the default.
+
+<Aside type="caution">
+Custody only goes up. The custody group count stored in the database never decreases, and a node that once ran with `--supernode` keeps acting as one (it logs `Because the --supernode flag was previously used, the node will continue to act as a super node.`). To go back to a smaller custody, resync with an empty database.
+</Aside>
+
+If the Beacon API answers a blob request with an error that suggests these flags, your node doesn't custody enough columns to rebuild the blobs.
+
+## Pruning
+
+By default the beacon node keeps every block and finalized state it has. <Flag name="beacon-db-pruning" /> starts a pruner that deletes blocks and states older than a retention window, once per epoch, after initial sync and backfill have finished.
+
+- <Flag name="pruner-retention-epochs" /> sets the window. The minimum, and the default, is `MIN_EPOCHS_FOR_BLOCK_REQUESTS + 1` (33025 epochs). Lower values are replaced by the minimum with the warning `Retention period too low, ignoring and using minimum required value`.
+- Pruned history is gone. The node can't serve blocks or states older than the window to peers or API clients.
+
+```bash
+--beacon-db-pruning \
+--pruner-retention-epochs=40000
+```
+
+The full storage guide, with disk use trade-offs, is [Storage, pruning and archive nodes](/operate/storage/).
+
+## Archive nodes
+
+An archive node answers API queries for historical states quickly. Prysm stores a full state at intervals and regenerates any other historical state by replaying blocks from the nearest one.
+
+- <Flag name="slots-per-archive-point" /> (default 2048 slots) sets the interval. Lower values make historical queries faster and use much more disk. Combine with backfill to `--backfill-oldest-slot=1` for full history.
+- <Flag name="enable-state-diff" /> (experimental) stores history as a hierarchy of snapshots and diffs instead, controlled by <Flag name="state-diff-exponents" />. It must be enabled on a fresh database (an existing database logs `Disabling state-diff feature` and continues without it), and the exponents are fixed when the database is created: changing them later makes the node refuse to start. `--slots-per-archive-point` is not used in this mode.
+- <Flag name="enable-historical-state-representation" /> migrates the database one way to a more compact layout. It is pending deprecation; don't use it on new nodes.
+- <Flag name="save-full-execution-payloads" /> stores full execution payloads instead of blinded blocks, so historical blocks don't need the execution client. It only works on a database created with it.
+- <Flag name="historical-slasher-node" /> prepares a node to feed a slasher: an archive point every 128 slots and a larger API page size. An explicit `--slots-per-archive-point` overrides the 128.
+
+```bash
+# Archive node with full history (Hoodi)
+./prysm.sh beacon-chain \
+  --hoodi \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc \
+  --enable-backfill \
+  --backfill-oldest-slot=1 \
+  --slots-per-archive-point=256 \
+  ...
+```
+
+## Back up and restore the database
+
+The beacon node has no backup endpoint in the current release (the `/db/backup` webhook described in older docs was removed). To back up the database, stop the node and copy `<datadir>/beaconchaindata/beaconchain.db`. Blobs and data columns are separate directories; you normally don't back them up, since the node fetches them again.
+
+To restore, stop the node and run the `db restore` subcommand:
+
+```bash
+beacon-chain db restore \
+  --restore-source-file=/backups/beaconchain.db \
+  --restore-target-dir=/var/lib/ethereum/beacon
+```
+
+It copies the file to `<restore-target-dir>/beaconchaindata/beaconchain.db`, asks before overwriting an existing database, and logs `Restore completed successfully`. The `--restore-*` flags do nothing outside this subcommand. For most operators, a fresh checkpoint sync is faster than restoring a backup; see [Back up and restore](/operate/backup-and-restore/).
+
+## Slasher
+
+<Flag name="slasher" /> runs a slasher inside the beacon node. It watches gossip for double votes, surround votes and double proposals, and puts the slashings it finds into the pool. It starts after the node has synced (`Completed chain sync, starting slashing detection`) and needs extra disk, memory and CPU. <Flag name="slasher-datadir" /> puts its database (`beaconchaindata/slasher.db`) on another disk; it defaults to `--datadir`.
+
+You don't need a slasher to protect your own validators; slashing protection lives in the validator client. See [Run a slasher](/operate/slasher/).
+
+## Pitfalls
+
+- **Checkpoint sync flags seem ignored.** The data directory already has a database. Use a new `--datadir`, or `--clear-db` once.
+- **`database contract is … but tried to run with …` at startup.** The data directory belongs to another network. Use a separate `--datadir`, or `--clear-db` once.
+- **Disk fills up after enabling `--supernode`.** Custody can't be lowered in place; resync with an empty database and without the flag.
+- **Historical API queries fail on a checkpoint-synced node.** The blocks are older than the checkpoint. Enable backfill, and check that pruning isn't removing them.

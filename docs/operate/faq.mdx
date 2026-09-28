@@ -1,0 +1,104 @@
+---
+title: "FAQ [TBR]"
+description: Short answers to the questions Prysm operators ask most, about the beacon node, validators, the network and maintenance, with links to the full pages.
+---
+
+import Flag from '@site/src/components/Flag';
+
+## Beacon node
+
+### How do I know my node is working?
+
+Check the logs and run the two `curl` commands in [Is my node healthy?](/operate/check-health/), then set up [dashboards and alerts](/operate/metrics/) so you don't have to check by hand.
+
+### How long does syncing take?
+
+With [checkpoint sync](/setup/checkpoint-sync/), the beacon node is ready in minutes. The execution client takes longer; until it's synced, the beacon node is *optimistic* and your validator can't perform duties.
+
+### Do I need my own execution client?
+
+Yes. Every beacon node needs one. See [Connect your execution client](/setup/connect-execution-client/).
+
+### How much disk do I need?
+
+See [System requirements](/get-started/system-requirements/) and [Disk space and archive nodes](/setup/storage/). The execution client uses most of it.
+
+### Where does Prysm keep its data and logs?
+
+In <Flag name="datadir" />: `~/.eth2` on Linux, `~/Library/Eth2` on macOS, `%LOCALAPPDATA%\Eth2` on Windows, unless you set it. A 24-hour debug log is in `<datadir>/logs/`. The wallet is in <Flag name="wallet-dir" bin="validator" />.
+
+### Can I run Prysm on a Raspberry Pi or other ARM machine?
+
+Prysm publishes Linux ARM64 binaries. Whether the machine is fast enough depends on memory and SSD speed; check the [system requirements](/get-started/system-requirements/) and [try it on Hoodi first](/get-started/quickstart/).
+
+## Validator
+
+### My balance is going down. What's wrong?
+
+Your validator is missing attestations. The usual causes are a beacon node that isn't synced, too few peers, or a wrong clock. See [Fix common problems](/operate/troubleshooting/). If validators across the whole network are losing at the same time, it isn't your setup.
+
+### My deposit went through, but Prysm says `Waiting for deposit to be observed by beacon node`.
+
+Deposits take time to process, then wait in the activation queue. Look up your public key on a block explorer for the right network, and see [Make a deposit](/validators/deposit/).
+
+### When will I propose a block?
+
+Proposers are picked at random, weighted by balance. A single validator proposes rarely, and long gaps are normal. The validator logs an upcoming proposal in its `Duties schedule` line.
+
+### Can I run the same keys on two machines for redundancy?
+
+**No.** Two validator clients with the same keys will eventually sign conflicting messages and get slashed. A few hours offline costs about what you would have earned in that time. See [Avoid slashing](/validators/avoid-slashing/).
+
+### How do I add more validators?
+
+Create the keys, deposit, then import them. The running validator picks up new keys from its wallet. See [Create validator keys](/validators/create-keys/) and [Import keys](/validators/import-keys/).
+
+### Can I reuse testnet keys on mainnet?
+
+No. Treat keys and mnemonics that have been on a testnet machine as exposed. Generate fresh mainnet keys offline.
+
+### How do I stop validating and get my ETH back?
+
+Exit the validator; the balance is then paid to your withdrawal address automatically. See [Exit a validator](/validators/exit/) and [Withdrawals and consolidation](/validators/withdrawals/).
+
+## Network
+
+### Which ports do I need to open?
+
+Only the P2P ports: TCP 13000, UDP 12000 and UDP 13000 for Prysm, plus your execution client's P2P port (often 30303). Keep every API and metrics port private. See [Ports, peers and router setup](/setup/networking/) and [Ports](/reference/ports/).
+
+### Why do I have so few peers?
+
+Usually your P2P ports aren't reachable from the internet. See [Ports, peers and router setup](/setup/networking/).
+
+### Can I expose the Beacon API so another machine can use it?
+
+Don't expose it to the internet. Use an SSH tunnel, a VPN or a private network.
+
+## Maintenance
+
+### How do I update, and can I roll back?
+
+See [Update and roll back](/install/update/). Updating is a restart with the new version. Some releases migrate the database; their release notes say so.
+
+### How do I check which version I run?
+
+Run:
+
+```bash
+./prysm.sh beacon-chain --version
+```
+
+Or look for the `version=` field in the `Prysm Beacon Chain started` log line.
+
+### What should I back up?
+
+Your mnemonic (offline), keystores and passwords, slashing protection history and configuration. Not the beacon database. See [Back up and restore](/operate/backup-and-restore/).
+
+### How do I move to another machine or client?
+
+Stop and disable the old validator, wait at least two epochs, then move the keys and slashing protection. See [Move to a new machine](/operate/move-to-new-machine/) and [Switch clients](/operate/switch-clients/).
+
+### Where do I get help?
+
+Ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP). For bugs, see [Fix common problems](/operate/troubleshooting/). More resources are in [Get help and resources](/resources/help/).

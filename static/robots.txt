@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://prysm.offchainlabs.com/docs/sitemap-index.xml

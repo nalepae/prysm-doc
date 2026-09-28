@@ -1,0 +1,183 @@
+---
+title: Besu
+description: Install and configure Besu as the execution client for a Prysm beacon node on Hoodi, mainnet or Sepolia, and check that the two are connected.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Besu](https://docs.besu-eth.org/) is the Apache 2.0-licensed execution client written in Java, developed in the open under the [besu-eth](https://github.com/besu-eth/besu) GitHub organization. It snap-syncs by default and stores state in its Bonsai format, which keeps only recent state and needs no manual pruning. It also serves private and permissioned networks.
+
+{/* Verified against Besu 26.9.0 (options from docs in besu-eth/besu-docs, main branch; Engine API options in app/src/main/java/org/hyperledger/besu/cli/options/EngineRPCOptions.java at 26.9.0), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://docs.besu-eth.org/public-networks/get-started/install/binary-distribution). Besu needs **Java 25 or later**.
+
+On Linux, download the packaged binaries from [GitHub releases](https://github.com/besu-eth/besu/releases), unpack them, and run `bin/besu --help` to check the install. On macOS, use Homebrew:
+
+```bash
+brew tap besu-eth/besu
+brew install besu-eth/besu/besu
+```
+
+Besu's docs recommend raising the open-files limit (`ulimit`) on Linux before syncing mainnet, and installing `jemalloc` to reduce memory use.
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Besu's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+besu \
+  --network=hoodi \
+  --data-path=$HOME/ethereum/execution \
+  --engine-rpc-port=8551 \
+  --engine-host-allowlist=localhost,127.0.0.1 \
+  --engine-jwt-secret=$HOME/ethereum/jwt.hex \
+  --rpc-http-enabled=true
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+besu \
+  --network=mainnet \
+  --data-path=$HOME/ethereum/execution \
+  --engine-rpc-port=8551 \
+  --engine-host-allowlist=localhost,127.0.0.1 \
+  --engine-jwt-secret=$HOME/ethereum/jwt.hex \
+  --rpc-http-enabled=true
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+besu \
+  --network=sepolia \
+  --data-path=$HOME/ethereum/execution \
+  --engine-rpc-port=8551 \
+  --engine-host-allowlist=localhost,127.0.0.1 \
+  --engine-jwt-secret=$HOME/ethereum/jwt.hex \
+  --rpc-http-enabled=true
+```
+
+</TabItem>
+</Tabs>
+
+On public networks, Besu enables the Engine API automatically and requires JWT authentication by default. `--engine-rpc-port` and `--engine-host-allowlist` show the defaults. `--rpc-http-enabled` turns on the regular JSON-RPC API on `127.0.0.1:8545` (with the `ETH`, `NET` and `WEB3` namespaces), which you use below to check sync status. If you run the unpacked release, call `bin/besu`.
+
+Besu's own examples use `--engine-host-allowlist="*"` and `--rpc-http-host=0.0.0.0`. Only do that on a host whose ports are firewalled; on one machine, the defaults are safer.
+
+### Memory
+
+By default, the JVM takes 25% of system RAM for its heap. Besu's [memory guide](https://docs.besu-eth.org/public-networks/how-to/configure-java/manage-memory) recommends a maximum heap of 5 GB on a 16 GB machine and 8 GB with 24 GB or more, set through `BESU_OPTS`:
+
+```bash
+export BESU_OPTS=-Xmx8g
+```
+
+Since 26.9.0, Besu exits when the JVM runs out of memory instead of carrying on in a broken state. Run it under a service manager that restarts it, such as systemd with `Restart=always`.
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--p2p-port`; UDP discovery follows it unless you set `--p2p-discovery-port`) | Yes, for more peers |
+| 8551 | TCP | Engine API (`--engine-rpc-port`) | No |
+| 8545 | TCP | JSON-RPC (`--rpc-http-port`) | No |
+| 9545 | TCP | Metrics, with `--metrics-enabled` (`--metrics-port`) | No |
+
+### Storage
+
+Keep the defaults for a staking node: snap sync (`--sync-mode=SNAP`) and Bonsai storage (`--data-storage-format=BONSAI`). On mainnet, Besu's default genesis file includes a checkpoint, so snap sync skips pre-merge block bodies and receipts. Besu's [system requirements](https://docs.besu-eth.org/public-networks/get-started/system-requirements) put snap sync with Bonsai on mainnet at about 1.14 TB.
+
+An older database that still holds pre-merge history can be pruned offline with `besu --data-path=<PATH> storage prune-pre-merge-blocks`. See [Prune pre-merge history](https://docs.besu-eth.org/public-networks/how-to/pre-merge-history-expiry).
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+Once Prysm is connected and Besu is synced, Besu logs every payload and fork-choice update:
+
+```text
+Imported #... (0x...)|   ... tx| ... bfee| ... gas used| ...ms exec| ... Mgas/s| .. peers
+FCU(VALID) | head: 0x... | safe: 0x... | finalized: 0x...
+```
+
+Ask Besu whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Besu is synced.
+
+## Troubleshooting
+
+**`Execution engine not called in ... seconds, consensus client may not be connected`.**
+Besu hasn't received an Engine API call. Check that Prysm is running, points at port 8551, and shows no authentication errors.
+
+**Prysm reports `401 Unauthorized`.**
+The secrets differ. Without `--engine-jwt-secret`, Besu writes a temporary `jwt.hex` into its data directory that Prysm doesn't know. If the path you give doesn't exist, Besu fails to start with `Could not read key from ...`. Point both clients at the same file.
+
+**`Client sent stale Engine API token with iat: ...`.**
+The clocks on the Prysm and Besu hosts disagree. Enable NTP on both.
+
+**Prysm on another host can't connect.**
+The Engine API only accepts the host names in `--engine-host-allowlist`. Add the name or IP that Prysm uses, and firewall port 8551 to the beacon node host.
+
+**`Too many open files`.**
+Raise the open-files limit for the Besu user (for example `LimitNOFILE=` in its systemd unit) and restart.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

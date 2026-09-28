@@ -1,0 +1,112 @@
+---
+title: "Security checklist [TBR]"
+description: The measures that protect your stake, your validators and your node - keys offline, withdrawal address, one validator per key, private APIs, a locked-down host, verified downloads and prompt updates.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Most staking losses come from a few causes: a leaked mnemonic, a wrong withdrawal address, the same key running in two places, and APIs left open to the internet. Work through this checklist before you go to mainnet, and again after any big change.
+
+## Protect your keys
+
+- [ ] **Generate keys offline.** Run the key generation tool on a machine that is disconnected from the network, and copy only the keystores and `deposit_data` file off it. See [Create validator keys](/validators/create-keys/).
+- [ ] **Keep the mnemonic on paper or metal, offline.** No photos, cloud notes, password managers or email. Never type it into a networked computer. Nobody legitimate ever asks for it, including Prysm maintainers.
+- [ ] **Set a withdrawal address you control.** Use an address from a hardware wallet or multisig, never an exchange deposit address, and set it when you create keys. After the deposit, check on a block explorer that the withdrawal credentials end with that address. See [Withdrawals and consolidation](/validators/withdrawals/).
+- [ ] **Use strong, unique keystore and wallet passwords.** Anyone who copies a keystore can try passwords offline.
+- [ ] **Lock down the password file.** <Flag name="wallet-password-file" bin="validator" /> stores the wallet password in plain text. Make it readable only by the validator user:
+
+  ```bash
+  sudo chown validator:validator /var/lib/ethereum/validator/wallet-password.txt
+  sudo chmod 600 /var/lib/ethereum/validator/wallet-password.txt
+  ```
+- [ ] **Delete the original keystores from the node after import**, and keep them only in your encrypted, offline backup. See [Back up and restore](/operate/backup-and-restore/).
+
+| If an attacker gets… | They can |
+| --- | --- |
+| Your mnemonic | Derive every key, and if you never set a withdrawal address, take your stake. |
+| A validator key | Get that validator slashed, or exit it. The balance still goes to your withdrawal address. |
+| Your withdrawal address key | Exit your validators and take everything paid to the address. |
+
+## Never get slashed
+
+- [ ] **Run each key in exactly one validator client.** No backup or failover copies.
+- [ ] **When you move keys, stop the old validator, wait at least 2 epochs, and bring the slashing protection history along.** See [Move to a new machine](/operate/move-to-new-machine/).
+- [ ] **Turn on doppelganger protection** with <Flag name="enable-doppelganger" bin="validator" /> when you start a validator after a move.
+
+See [Avoid slashing](/validators/avoid-slashing/).
+
+## Keep APIs private
+
+Every Prysm API listens on `127.0.0.1` by default. Keep it that way.
+
+| Port | What it is | Why it must stay private |
+| --- | --- | --- |
+| 3500 | Beacon API | No authentication. Anyone can submit to your node and change the fee recipient it uses. |
+| 4000 | Beacon node gRPC | No authentication. Anyone can act as a validator client against your node. |
+| 7500 | Validator Keymanager API (with <Flag name="rpc" bin="validator" /> or <Flag name="web" bin="validator" />) | With the token, a caller can import and delete keys, change your fee recipient, and sign exits. |
+| 8080, 8081 | Metrics | Reveal your validator keys and balances. |
+| 8551 | Execution client Engine API | Controls your execution client. Keep it on localhost or a private network. |
+
+- [ ] **Open only the P2P ports to the internet:** TCP 13000, UDP 12000 and UDP 13000 for Prysm, and your execution client's P2P port. See [Ports](/reference/ports/).
+- [ ] **Reach APIs from another machine only through an SSH tunnel or a VPN**, for example `ssh -N -L 3500:127.0.0.1:3500 <USER>@<NODE_HOST>`. Never bind an API to `0.0.0.0` on a machine with a public IP.
+- [ ] **With Docker, publish API ports on localhost only** (`127.0.0.1:3500:3500`), or not at all. Docker's published ports bypass `ufw`.
+- [ ] **Keep `jwt.hex` readable only by the execution client and beacon node.**
+- [ ] **Treat the Keymanager token file** (`auth-token` in the wallet directory) like a key.
+
+Check what listens where:
+
+```bash
+sudo ss -tlnp | grep -E ':(3500|4000|7500|8080|8081|8551|8545)\b'
+```
+
+Every line must show `127.0.0.1` (or a private IP), not `0.0.0.0` or `*`.
+
+## Lock down the host
+
+- [ ] **Use a dedicated machine** that runs only your node software. No browsing, email or games.
+- [ ] **Use SSH keys only.** Disable password and root logins, after confirming key login works in a second session:
+
+  ```ini title="/etc/ssh/sshd_config.d/10-hardening.conf"
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  PermitRootLogin no
+  ```
+
+  Apply with:
+
+  ```bash
+  sudo sshd -t && sudo systemctl reload ssh
+  ```
+- [ ] **Turn on a default-deny firewall** and allow only SSH and the P2P ports:
+
+  ```bash
+  sudo ufw default deny incoming
+  sudo ufw default allow outgoing
+  sudo ufw allow 22/tcp
+  sudo ufw allow 13000/tcp
+  sudo ufw allow 13000/udp
+  sudo ufw allow 12000/udp
+  sudo ufw allow 30303      # execution client P2P; check your client's port
+  sudo ufw enable
+  ```
+
+  On a home network, forward only the P2P ports on your router, and don't use the router's DMZ.
+- [ ] **Run each client as its own unprivileged user** (`execution`, `beacon`, `validator`), never as root. See [Run with systemd](/setup/run-with-systemd/).
+- [ ] **Keep the clock in sync** with `chrony` or `systemd-timesyncd`. A wrong clock causes missed duties.
+- [ ] **Encrypt backups** and store them off the machine. Don't sync the live validator directory to a cloud drive.
+
+## Install and update safely
+
+- [ ] **Verify every download** against its signature or checksum. See [How verification works](/install/#how-verification-works). Do the same for the rest of your stack (execution client, MEV-Boost, remote signer, deposit CLI): download each from its official release page and follow that project's own verification steps.
+- [ ] **Turn on automatic OS security updates** (`unattended-upgrades` on Ubuntu and Debian), and make sure your services start on boot.
+- [ ] **Update Prysm and your execution client promptly** when a release is marked as a security or high-priority update. See [Update and roll back](/install/update/).
+- [ ] **Watch for problems.** Set up [dashboards and alerts](/operate/metrics/), and rehearse migrations and restores on Hoodi.
+
+<Aside type="caution" title="Watch out for scams">
+Fake support staff in Discord DMs, fake launchpads and "validator tools" that ask for your mnemonic are common. Prysm maintainers never contact you first by DM and never ask for your mnemonic or keys. Deposit only through the official launchpad.
+</Aside>
+
+## Report a vulnerability
+
+If you find a security vulnerability in Prysm, **don't open a public issue or post in Discord.** Email `security@prysmaticlabs.com`. The Prysm [security policy](https://github.com/OffchainLabs/prysm/blob/develop/SECURITY.md) and [security.txt](https://github.com/OffchainLabs/prysm/blob/develop/.well-known/security.txt) list the PGP keys to encrypt your report. For bugs in the Ethereum protocol itself, use the [Ethereum Foundation bug bounty](https://ethereum.org/en/bug-bounty/).

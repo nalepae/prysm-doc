@@ -1,0 +1,165 @@
+---
+title: Nethermind
+description: Install and configure Nethermind as the execution client for a Prysm beacon node on Hoodi, mainnet or Sepolia, and check that the two are connected.
+---
+
+import { Aside, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+[Nethermind](https://docs.nethermind.io/) is the execution client written in C# on .NET and maintained by Nethermind. It snap-syncs by default, ships ready-made configurations per network, and has built-in health checks and extensive tuning options.
+
+{/* Verified against Nethermind 2.0.0 (docs.nethermind.io, network configs in src/Nethermind/Nethermind.Runner/configs at the 2.0.0 tag), 2026-09 */}
+
+## Install
+
+Follow the official [installation guide](https://docs.nethermind.io/get-started/installing-nethermind/). On Ubuntu, the PPA is the most common method:
+
+```bash
+sudo add-apt-repository ppa:nethermindeth/nethermind
+sudo apt-get update
+sudo apt-get install nethermind
+```
+
+On macOS, use `brew tap nethermindeth/nethermind` then `brew install nethermind`. On Windows, use `winget install --id Nethermind.Nethermind`. The Docker image is `nethermind/nethermind`.
+
+## Configure
+
+Create the JWT secret first, as described in [Connect an execution client](/setup/connect-execution-client/#connect-over-http-with-a-jwt-secret). The commands below expect it at `~/ethereum/jwt.hex` and keep Nethermind's data in `~/ethereum/execution`.
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+nethermind \
+  -c hoodi \
+  --data-dir $HOME/ethereum/execution \
+  --jsonrpc-jwtsecretfile $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+nethermind \
+  -c mainnet \
+  --data-dir $HOME/ethereum/execution \
+  --jsonrpc-jwtsecretfile $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+nethermind \
+  -c sepolia \
+  --data-dir $HOME/ethereum/execution \
+  --jsonrpc-jwtsecretfile $HOME/ethereum/jwt.hex
+```
+
+</TabItem>
+</Tabs>
+
+`-c` (`--config`) loads Nethermind's built-in configuration for the network. Those configurations already enable JSON-RPC on `127.0.0.1:8545` and the Engine API on `127.0.0.1:8551`, so you only add the JWT secret. Nethermind accepts both spellings of each option: `--jsonrpc-jwtsecretfile` and `--JsonRpc.JwtSecretFile` are the same.
+
+### Ports
+
+| Port | Protocol | Purpose | Expose to the internet? |
+| --- | --- | --- | --- |
+| 30303 | TCP and UDP | Peer-to-peer (`--Network.P2PPort`, `--Network.DiscoveryPort`) | Yes, for more peers |
+| 8551 | TCP | Engine API (`--JsonRpc.EnginePort`) | No |
+| 8545 | TCP | JSON-RPC (`--JsonRpc.Port`) | No |
+| Your choice | TCP | Metrics, with `--Metrics.Enabled true` and `--Metrics.ExposePort <PORT>` | No |
+
+To move the Engine API to another interface, set both `--JsonRpc.EngineHost` and `--JsonRpc.EnginePort`: Nethermind requires the port whenever you set the host.
+
+### Storage
+
+Keep the default configuration for a staking node. It prunes state automatically and doesn't download old block bodies and receipts. Nethermind's [system requirements](https://docs.nethermind.io/get-started/system-requirements/) say that, as of October 2024, a mainnet node with the default configuration needs at least 2 TB, of which Nethermind itself takes around 1 TB. Archive configurations (`-c mainnet_archive`) need far more. See [Database](https://docs.nethermind.io/fundamentals/database/) for the options.
+
+## Connect Prysm
+
+Start the beacon node with the same JWT secret, from `~/ethereum/consensus`:
+
+<Tabs syncKey="network">
+<TabItem label="Hoodi">
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://hoodi.beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Mainnet">
+
+```bash
+./prysm.sh beacon-chain \
+  --mainnet \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://beaconstate.ethstaker.cc
+```
+
+</TabItem>
+<TabItem label="Sepolia">
+
+```bash
+./prysm.sh beacon-chain \
+  --sepolia \
+  --execution-endpoint=http://localhost:8551 \
+  --jwt-secret=$HOME/ethereum/jwt.hex \
+  --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+```
+
+</TabItem>
+</Tabs>
+
+Add <Flag name="suggested-fee-recipient" /> if validators will use this node. See [Connect an execution client](/setup/connect-execution-client/) for what each flag does.
+
+## Check that it works
+
+At startup, Nethermind confirms which secret it loaded:
+
+```text
+Reading authentication secret from '/home/<USER>/ethereum/jwt.hex'
+```
+
+Once Prysm is connected, Nethermind logs each payload and fork-choice update it receives:
+
+```text
+Received New Block:  ...
+Received ForkChoice: ... (0x...), Safe: ... (0x...), Finalized: ... (0x...)
+Synced Chain Head to ...
+```
+
+Ask Nethermind whether it's still syncing:
+
+```bash
+curl -s -X POST -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+  http://127.0.0.1:8545
+```
+
+`"result":false` means Nethermind is synced.
+
+## Troubleshooting
+
+**`Not receiving ForkChoices from the consensus client that are required to sync.`**
+Nethermind hasn't heard from Prysm. Check that the beacon node is running, points at port 8551, and uses the same JWT secret.
+
+**`The authentication secret file '...' was not found or was empty, so it has been automatically created.`**
+The path given to `--jsonrpc-jwtsecretfile` doesn't exist, so Nethermind made a new secret there that Prysm doesn't know. Without the option, Nethermind generates one at `keystore/jwt-secret` in its root directory. Fix the path so both clients read the same file.
+
+**`Message authentication error: Invalid token signature.`**
+Prysm is using a different secret. Point both clients at the same file and restart them.
+
+**`Token expired. iat: ..., now: ...`**
+The clocks on the Prysm and Nethermind hosts disagree. Enable NTP on both.
+
+## Next steps
+
+- [Connect an execution client](/setup/connect-execution-client/)
+- [Node and validator on one machine](/setup/topologies/single-machine/)
+- [Run with systemd](/setup/systemd/)

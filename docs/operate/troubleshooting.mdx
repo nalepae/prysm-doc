@@ -1,0 +1,116 @@
+---
+title: "Fix common problems [TBR]"
+description: Find your symptom or error message and fix it - no peers, stuck sync, execution client and JWT errors, optimistic node, missed attestations and proposals, clock, disk and database errors.
+---
+
+import { Aside } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+Find the symptom or log line you see. Fix problems in the order *execution client → beacon node → validator*: a validator can't work if its beacon node can't, and a beacon node can't if its execution client can't. To find which one is unhappy, start with [Is my node healthy?](/operate/check-health/)
+
+## Peers and sync
+
+**`Waiting for enough suitable peers before syncing` for more than a few minutes, or `Connected peers` shows `inboundTCP=0`**
+
+Nobody can reach your node. Open or forward TCP 13000, UDP 12000 and UDP 13000 on your firewall and router (or the ports you set with <Flag name="p2p-tcp-port" />, <Flag name="p2p-udp-port" />, <Flag name="p2p-quic-port" />). Behind NAT, set <Flag name="p2p-host-ip" /> to your public IP. See [Ports, peers and router setup](/setup/networking/).
+
+**Few peers, and the node is on the wrong network**
+
+The beacon node, the execution client and the data directory must all be on the same network. Use `--hoodi` or `--mainnet` consistently, and don't reuse a data directory from another network.
+
+**Sync is slow or stops (`blocksPerSecond` near zero, `Synced new block` lines stop)**
+
+Check peers first (above). Then check the execution client's logs and the disk: a slow disk or an overloaded execution client holds everything back. If you synced from genesis, use [checkpoint sync](/setup/checkpoint-sync/) instead. If a restart doesn't help and it keeps stopping at the same slot, resync from scratch; see [Disk space and archive nodes](/setup/storage/).
+
+On Windows, clicking inside a console window can pause its output. Press **Enter** to resume, or turn off Quick Edit mode.
+
+## Execution client
+
+**`Could not connect to execution client endpoint` with `connection refused`**
+
+The execution client isn't running, or its Engine API listens on another address. Start it, and check that its Engine API port (usually 8551) matches <Flag name="execution-endpoint" />.
+
+**`HTTP authentication to your execution client is not working...`, or errors with `401 Unauthorized` or `signature is invalid`**
+
+The two clients use different JWT secrets. Point both at the same `jwt.hex` with <Flag name="jwt-secret" />, and make sure the user running the beacon node can read it. See [Connect your execution client](/setup/connect-execution-client/).
+
+**`is_optimistic: true`, or the validator logs `the node is currently optimistic and cannot serve validators`**
+
+The execution client is still syncing. Wait for it; the validator resumes on its own. If the execution client says it's synced, check its logs for errors and restart it.
+
+## Validator
+
+**`Validator service health check failed, waiting for healthy beacon node...` or `Could not determine if beacon chain started`**
+
+The validator can't reach the beacon node. Check that the beacon node runs and that <Flag name="beacon-rpc-provider" bin="validator" /> (default `127.0.0.1:4000`) points at it.
+
+**`Waiting for deposit to be observed by beacon node` or `Waiting for activation...`**
+
+Your validator isn't active yet. Look up the public key on a block explorer for the right network. If the explorer doesn't know it, the deposit didn't arrive; see [Make a deposit](/validators/deposit/). If it shows pending, wait: the activation queue can take days.
+
+**`Waiting for keymanager to initialize validator client with web UI or /v2/validator/wallet/create REST api`**
+
+The validator found no wallet at <Flag name="wallet-dir" bin="validator" />. Point it at the wallet you imported into, or [import your keys](/validators/import-keys/).
+
+**Missed attestations, or `correctlyVotedTargetPct` below 100%**
+
+Almost always the beacon node: it's syncing, optimistic, or has few peers. Work through [Is my node healthy?](/operate/check-health/) Also check `sinceSlotStartTime` in `Submitted new attestations`: well above 4 seconds means late blocks or a wrong clock (below). One or two misses around a restart are normal.
+
+**Missed proposal, or `Failed to propose block`**
+
+Read the error in that line and the beacon node logs for the same slot. The usual causes are a beacon node that wasn't synced, or relay problems when you use MEV-Boost (Prysm falls back to a local block if the builder fails in time). If the validator logged `Submitted new block` but the slot is empty on the explorer, your block arrived too late: check peers and your clock. See [Use MEV-Boost](/validators/mev-boost/).
+
+**`Duplicate instances exists in the network for validator keys`**
+
+Doppelganger protection found your key signing somewhere else. **Don't start this validator.** Find and stop the other instance first. See [Avoid slashing](/validators/avoid-slashing/).
+
+## Machine
+
+**Late attestations and blocks, or peers dropping: clock skew**
+
+Your clock must be accurate to well under a second. On Linux, this must show `System clock synchronized: yes`:
+
+```bash
+timedatectl status
+```
+
+Fix it with the following command, or install `chrony`:
+
+```bash
+sudo timedatectl set-ntp true
+```
+
+On Windows, turn on **Set time automatically** in Date & time settings.
+
+**Disk full**
+
+A full disk stops the execution client and beacon node, and can corrupt their databases. Free space or add disk, then restart. See [Disk space and archive nodes](/setup/storage/).
+
+**`cannot obtain database lock, database may be in use by another process`**
+
+Another process has the database open, often a second beacon node or validator, or an old container. Find it with the following command and stop it:
+
+```bash
+pgrep -af 'beacon-chain|validator'
+```
+
+For a validator, this can mean **two validators with the same keys**: stop everything and check before you continue.
+
+**Crashes when opening the beacon database after a power cut or full disk**
+
+The database is corrupted. Delete the beacon data directory and resync with [checkpoint sync](/setup/checkpoint-sync/). Never delete the **validator** data directory without first exporting slashing protection; see [Back up and restore](/operate/backup-and-restore/).
+
+## Ask for help or report a bug
+
+Search the [open issues](https://github.com/OffchainLabs/prysm/issues) first. If nobody has reported it, open a [bug report](https://github.com/OffchainLabs/prysm/issues/new?template=bug_report.yml) with:
+
+- Prysm and execution client versions, OS, and how you installed Prysm.
+- The network, and your full command lines or config files, without secrets.
+- What happened and when it started.
+- The 24-hour debug log from `<datadir>/logs/beacon-chain.log` (or `validator.log`), attached as a file.
+
+<Aside type="caution" title="Redact before you share">
+Remove IP addresses, JWT secrets and API tokens. Never share a keystore, its password or your mnemonic; nobody legitimate will ask for them.
+</Aside>
+
+For questions, ask in the [Prysm Discord](https://discord.gg/qEZK94mFXP).

@@ -1,0 +1,225 @@
+---
+title: "prysmctl workflows"
+description: "Worked examples for every prysmctl command: checkpoint state download, weak subjectivity checkpoints, validator exits, withdrawal credentials, proposer settings export, database inspection, p2p requests and testnet genesis."
+---
+
+import Flag from '@site/src/components/Flag';
+
+`prysmctl` is Prysm's toolbox for one-off tasks that don't belong in a long-running process. Most commands talk to a running, synced beacon node or validator client; the database commands read files directly. This page shows each command with a working example, the flags you must pass, and the mistakes people make. Every flag is also annotated in the [prysmctl CLI reference](/reference/cli/prysmctl/).
+
+## Run prysmctl
+
+On Linux and macOS, `prysm.sh` downloads and runs `prysmctl` like the other binaries:
+
+```bash
+./prysm.sh prysmctl --help
+```
+
+The Windows `prysm.bat` launcher doesn't handle `prysmctl`; download the `prysmctl` binary from the [release page](https://github.com/OffchainLabs/prysm/releases) instead. See [Install with binaries](/install/binaries/). The examples below write `prysmctl` for the command; prefix it with `./prysm.sh` if you use the script.
+
+Use the same Prysm version for `prysmctl` as for your beacon node and validator.
+
+## Download a checkpoint state
+
+`checkpoint-sync download` saves the latest finalized state and its block from a beacon node's REST API into the current directory. Use it to [checkpoint sync](/setup/checkpoint-sync/) from files instead of from a URL, for example to keep a copy or to start several nodes from the same state.
+
+```bash
+prysmctl checkpoint-sync download \
+  --beacon-node-host=https://<TRUSTED_BEACON_NODE> \
+  --http-timeout=10m
+```
+
+It writes two SSZ files named after network, fork, slot and root:
+
+```text
+Saved ssz-encoded block to block_<network>_<fork>_<slot>-0x<root>.ssz
+Saved ssz-encoded state to state_<network>_<fork>_<slot>-0x<root>.ssz
+```
+
+Start the beacon node with them:
+
+```bash
+./prysm.sh beacon-chain \
+  --hoodi \
+  --checkpoint-state=state_hoodi_<fork>_<slot>-0x<root>.ssz \
+  --checkpoint-block=block_hoodi_<fork>_<slot>-0x<root>.ssz \
+  --genesis-beacon-api-url=https://<TRUSTED_BEACON_NODE>
+```
+
+The beacon node flags are <Flag name="checkpoint-state" />, <Flag name="checkpoint-block" /> and <Flag name="genesis-beacon-api-url" />.
+
+Pitfalls:
+
+- <Flag name="beacon-node-host" bin="prysmctl" /> accepts a full URL or `host:port` (`http://` is then assumed). The default is `localhost:3500`.
+- A mainnet state is several hundred megabytes. The default <Flag name="http-timeout" bin="prysmctl" /> is 4 minutes per request; raise it on slow connections.
+- The node you download from decides which chain you follow. Use one you trust and compare the block root with an independent source.
+
+## Compute a weak subjectivity checkpoint
+
+`weak-subjectivity checkpoint` asks a trusted beacon node for a recent safe checkpoint and prints it in the form the beacon node's <Flag name="weak-subjectivity-checkpoint" /> flag expects:
+
+```bash
+prysmctl weak-subjectivity checkpoint --beacon-node-host=http://127.0.0.1:3500
+```
+
+```text
+Use the following flag when starting a prysm Beacon Node to ensure the chain history includes the Weak Subjectivity Checkpoint:
+--weak-subjectivity-checkpoint=0x<block_root>:<epoch>
+```
+
+Prysm beacon nodes answer from a Prysm-specific endpoint. For other clients' beacon nodes, `prysmctl` logs `falling back to generic checkpoint derivation` and computes the checkpoint from the head state, which downloads a full state (raise <Flag name="http-timeout" bin="prysmctl" /> if needed).
+
+## Exit validators
+
+`validator exit` signs and submits a voluntary exit, the same as `validator accounts voluntary-exit`. It needs the wallet (or Web3Signer) and a **synced** beacon node reachable over gRPC.
+
+```bash
+prysmctl validator exit \
+  --hoodi \
+  --wallet-dir=/var/lib/ethereum/validator/wallet \
+  --wallet-password-file=/var/lib/ethereum/validator/wallet-password.txt \
+  --beacon-rpc-provider=127.0.0.1:4000 \
+  --public-keys=0x<VALIDATOR_PUBKEY> \
+  --accept-terms-of-use
+```
+
+The command shows the keys and asks `continue with the voluntary exit? (y/n)`.
+
+Pitfalls:
+
+- You must pass <Flag name="wallet-dir" bin="prysmctl" /> explicitly, even for the default location, or the Web3Signer flags. Otherwise it stops with `No validators found`.
+- It uses gRPC only (<Flag name="beacon-rpc-provider" bin="prysmctl" />, beacon node port 4000), even if your validator uses REST. It refuses to run while the beacon node is syncing.
+- Pass the network flag your validators run on (`--hoodi`, `--mainnet`...).
+- <Flag name="exit-all" bin="prysmctl" /> selects every key, and <Flag name="force-exit" bin="prysmctl" /> skips the confirmation. Together they exit everything without asking.
+- <Flag name="exit-json-output-dir" bin="prysmctl" /> writes the signed exits to files instead of broadcasting them. Anyone with those files can broadcast them later.
+
+Exits can't be undone. Read [Exit a validator](/validators/exit/) first.
+
+## Set withdrawal credentials
+
+`validator withdraw` submits signed BLS-to-execution changes, which turn `0x00` withdrawal credentials into an execution address. You sign the messages offline with the deposit CLI (its `generate-bls-to-execution-change` command writes `bls_to_execution_change-*.json` files); `prysmctl` only broadcasts them.
+
+```bash
+prysmctl validator withdraw \
+  --beacon-node-host=http://127.0.0.1:3500 \
+  --path=./bls_to_execution_changes \
+  --confirm \
+  --accept-terms-of-use
+```
+
+The command prints `SETTING VALIDATOR INDEX <index> TO WITHDRAWAL ADDRESS <address>` for every message, submits them, then checks the beacon node's pool:
+
+```text
+All (total:1) signed withdrawal messages were found in the pool.
+```
+
+Pitfalls:
+
+- Both <Flag name="confirm" bin="prysmctl" /> and <Flag name="accept-terms-of-use" bin="prysmctl" /> are required on every run, including with <Flag name="verify-only" bin="prysmctl" />.
+- <Flag name="path" bin="prysmctl" /> can be a file or a directory; every `.json` file in it is tried, and files that aren't lists of signed changes are skipped with a warning.
+- A message missing from the pool may already be included in a block. Check your validator on a [block explorer](/resources/block-explorers/) before resubmitting.
+- The address can't be changed once the change is included. Check it character by character. See [Withdrawals](/validators/withdrawals/).
+
+To check without submitting, add <Flag name="verify-only" bin="prysmctl" />.
+
+## Export proposer settings
+
+`validator proposer-settings` reads the fee recipient of every key from a running validator's Keymanager API and, optionally, writes them as a [proposer settings file](/flags/proposer-settings/). The validator must run with <Flag name="rpc" bin="validator" />.
+
+```bash
+prysmctl validator proposer-settings \
+  --validator-host=http://127.0.0.1:7500 \
+  --token=$(cat /var/lib/ethereum/validator/auth-token) \
+  --output-proposer-settings-path=./proposer-settings.json \
+  --default-fee-recipient=<YOUR_ETH_ADDRESS>
+```
+
+Pitfalls:
+
+- <Flag name="validator-host" bin="prysmctl" /> and <Flag name="token" bin="prysmctl" /> are both required, even when the host is the default. The token is the content of the validator's <Flag name="keymanager-token-file" bin="validator" />.
+- Without <Flag name="output-proposer-settings-path" bin="prysmctl" />, the command only prints the current fee recipients. With it, <Flag name="default-fee-recipient" bin="prysmctl" /> fills `default_config`; if you omit it, you are prompted.
+- The file contains fee recipients only. Add gas limits, graffiti and builder settings yourself.
+
+## Inspect a beacon database
+
+`db buckets` and `db query` look inside the beacon node's BoltDB file. They are debugging tools; stop the beacon node first, because the database is locked while it runs (`cannot obtain database lock`).
+
+```bash
+prysmctl db buckets
+prysmctl db query \
+  --path=/var/lib/ethereum/beacon/beaconchaindata/beaconchain.db \
+  --bucket=blocks \
+  --prefix=0xa1 \
+  --print-keys
+```
+
+Pitfalls:
+
+- `db buckets` prints the bucket names built into this `prysmctl` version; it doesn't open a database, and its <Flag name="path" bin="prysmctl" /> flag is ignored.
+- For `db query`, <Flag name="path" bin="prysmctl" /> is the path of the `beaconchain.db` **file**, despite the flag description. The file is opened read-write and created if it doesn't exist, so a typo leaves an empty file behind. Work on a copy if in doubt.
+- Only key prefix scans are implemented: without <Flag name="prefix" bin="prysmctl" /> nothing happens, and without <Flag name="print-keys" bin="prysmctl" /> the scan fails with `prefix scan with value display not implemented`.
+
+## Inspect slasher spans
+
+`db slasher-span-display` prints the min or max span values the [slasher](/operate/slasher/) stored for a validator, to debug surround-vote detection.
+
+```bash
+prysmctl db slasher-span-display \
+  --db-path-directory=/var/lib/ethereum/beacon/beaconchaindata \
+  --validator-index=12345 \
+  --epoch=250000 \
+  --chunk-kind=minspan
+```
+
+The slasher keeps `slasher.db` in the `beaconchaindata` directory of the beacon node's data directory (or of <Flag name="slasher-datadir" /> if set).
+<Flag name="db-path-directory" bin="prysmctl" />, <Flag name="validator-index" bin="prysmctl" /> and <Flag name="epoch" bin="prysmctl" /> are required. Leave <Flag name="chunk-size" bin="prysmctl" />, <Flag name="validator-chunk-size" bin="prysmctl" /> and <Flag name="history-length" bin="prysmctl" /> unset unless the slasher was run with non-default parameters. Stop the beacon node first.
+
+## Send p2p requests
+
+`p2p send beacon-blocks-by-range` and `p2p send blobs-by-range` start a temporary libp2p host, handshake with peers, send one request and report what came back. Use them to test whether a peer serves data correctly.
+
+```bash
+prysmctl p2p send beacon-blocks-by-range \
+  --network=hoodi \
+  --prysm-api-endpoints=127.0.0.1:4000 \
+  --peer-multiaddrs=/ip4/<PEER_IP>/tcp/13000/p2p/<PEER_ID> \
+  --count=32
+```
+
+Pitfalls:
+
+- A Prysm beacon node's gRPC API (<Flag name="prysm-api-endpoints" bin="prysmctl" />, default `localhost:4000`) is always needed: it provides genesis and head data for the handshake, and the peer list when you don't pass <Flag name="peer-multiaddrs" bin="prysmctl" />.
+- Without <Flag name="start-slot" bin="prysmctl" />, the request starts at the first slot of the previous epoch.
+- Ports 13001 (TCP and QUIC) are used locally by default; change <Flag name="client-port-tcp" bin="prysmctl" /> if they clash.
+- `blobs-by-range` has no `--network` flag and assumes mainnet unless you pass <Flag name="chain-config-file" bin="prysmctl" />. Since Fulu, peers serve data column sidecars instead of blob sidecars for new slots.
+
+## Generate a testnet genesis
+
+`testnet generate-genesis` builds a beacon genesis state (and optionally a matching execution `genesis.json`) for a private devnet. See [Run a local devnet](/developers/local-devnet/) for the full setup.
+
+```bash
+prysmctl testnet generate-genesis \
+  --chain-config-file=config.yaml \
+  --fork=electra \
+  --num-validators=64 \
+  --genesis-time-delay=120 \
+  --geth-genesis-json-in=genesis.json \
+  --geth-genesis-json-out=genesis.json \
+  --output-ssz=genesis.ssz
+```
+
+Start the beacon nodes with <Flag name="genesis-state" value="genesis.ssz" /> and the same <Flag name="chain-config-file" />, and initialize the execution client with the written `genesis.json`.
+
+Pitfalls:
+
+- <Flag name="chain-config-file" bin="prysmctl" /> is required in practice (`No chain config file was provided`), and so is <Flag name="num-validators" bin="prysmctl" />, even when you pass <Flag name="deposit-json-file" bin="prysmctl" />.
+- At least one of <Flag name="output-ssz" bin="prysmctl" />, <Flag name="output-json" bin="prysmctl" /> or <Flag name="output-yaml" bin="prysmctl" /> is required.
+- <Flag name="fork" bin="prysmctl" /> defaults to `phase0`; set it to the fork active at epoch 0 in your config.
+- With <Flag name="geth-genesis-json-in" bin="prysmctl" />, the fork times in the file are rewritten from the chain config, and post-merge networks need `baseFeePerGas` in it.
+- Generated validators use the public interop keys. Never use them outside a private test network.
+
+## Next steps
+
+- [prysmctl CLI reference](/reference/cli/prysmctl/): every flag, annotated.
+- [Checkpoint sync](/setup/checkpoint-sync/).
+- [Exit a validator](/validators/exit/) and [Withdrawals](/validators/withdrawals/).

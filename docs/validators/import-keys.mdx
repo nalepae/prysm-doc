@@ -1,0 +1,145 @@
+---
+title: "Import keys [TBR]"
+description: "Import the keystores from the deposit CLI into a Prysm wallet, start the validator with them, and list or remove accounts."
+---
+
+import { Steps, Tabs, TabItem } from '@site/src/components/ui';
+import Flag from '@site/src/components/Flag';
+
+The Prysm validator client signs with keys stored in a **wallet**, a folder that holds your keystores encrypted with a wallet password. This page imports the `keystore-m_*.json` files from the deposit CLI and starts the validator with them.
+
+## Before you begin
+
+- Have the `validator_keys` folder from [Create validator keys](/validators/create-keys/) and its keystore password.
+- [Install Prysm](/install/).
+- If these keys have **ever** run in another validator client, stop that client for good first and bring its slashing protection history. See [Avoid slashing](/validators/avoid-slashing/).
+
+:::danger[One key, one validator client]
+Never load the same key into two running validator clients, on the same machine or on different ones. Both sign, and the key gets slashed. This includes "backup" or "failover" setups.
+:::
+
+## Import your keystores
+
+<Steps>
+
+1. **Copy the keystores to the node**, for example to `~/ethereum/validator_keys`. Only the `keystore-m_*.json` files are needed.
+
+2. **Import them.** This creates the wallet if it doesn't exist yet.
+
+   <Tabs syncKey="os">
+   <TabItem label="Linux, macOS">
+
+   ```bash
+   cd ~/ethereum/consensus
+   ./prysm.sh validator accounts import \
+     --hoodi \
+     --keys-dir=<PATH_TO_VALIDATOR_KEYS> \
+     --wallet-dir=./wallet
+   ```
+
+   </TabItem>
+   <TabItem label="Windows">
+
+   ```powershell
+   cd $HOME\ethereum\consensus
+   .\prysm.bat validator accounts import `
+     --hoodi `
+     --keys-dir=<PATH_TO_VALIDATOR_KEYS> `
+     --wallet-dir=.\wallet
+   ```
+
+   </TabItem>
+   </Tabs>
+
+   Replace `<PATH_TO_VALIDATOR_KEYS>` with the folder from step 1, and `--hoodi` with `--mainnet` on mainnet. Prysm asks for two passwords:
+
+   - **New wallet password** (twice, at least 8 characters). It encrypts the wallet; the validator needs it every time it starts.
+   - **The password for your imported accounts**: the keystore password from the deposit CLI. Keystores with different passwords need separate imports.
+
+3. **Read the result:**
+
+   ```text
+   INFO local: Successfully imported validator key(s) pubkeys=<PUBKEY>
+   INFO accounts: Imported accounts [<PUBKEY>], view all of them by running `accounts list`
+   ```
+
+4. **Save the wallet password to a file** so the validator can start without a prompt, readable only by you:
+
+   ```bash
+   install -m 600 /dev/null ./wallet-password.txt
+   nano ./wallet-password.txt   # type the wallet password, save
+   ```
+
+5. **Start the validator with the wallet:**
+
+   ```bash
+   ./prysm.sh validator \
+     --hoodi \
+     --wallet-dir=./wallet \
+     --wallet-password-file=./wallet-password.txt \
+     --suggested-fee-recipient=<YOUR_WALLET_ADDRESS>
+   ```
+
+   Replace `<YOUR_WALLET_ADDRESS>` with the address that should receive block fees.
+
+</Steps>
+
+Use the same <Flag name="wallet-dir" bin="validator" /> for the import and the validator. If you leave it out, Prysm uses a default location (`~/.eth2validators/prysm-wallet-v2` on Linux).
+
+If the validator is already running with this wallet, you don't need to restart it: it picks up newly imported keys on its own.
+
+## Import without prompts
+
+For scripts and services, pass both passwords as files. <Flag name="wallet-password-file" bin="validator" /> holds the wallet password and <Flag name="account-password-file" bin="validator" /> the keystore password:
+
+```bash
+./prysm.sh validator accounts import \
+  --hoodi \
+  --keys-dir=<PATH_TO_VALIDATOR_KEYS> \
+  --wallet-dir=./wallet \
+  --wallet-password-file=./wallet-password.txt \
+  --account-password-file=<KEYSTORE_PASSWORD_FILE> \
+  --accept-terms-of-use
+```
+
+:::caution[No newline in the keystore password file]
+Prysm reads the keystore password file exactly as it is, so a trailing newline (which most editors add) makes the password wrong. Write it with `printf '%s' '<KEYSTORE_PASSWORD>' > <KEYSTORE_PASSWORD_FILE>`, and delete the file after the import.
+:::
+
+## Check that it works
+
+List the accounts in the wallet:
+
+```bash
+./prysm.sh validator accounts list --wallet-dir=./wallet
+```
+
+```text
+Showing 2 validator accounts
+
+Account 0 | <ACCOUNT_NAME>
+[validating public key] 0x<PUBKEY>
+
+Account 1 | <ACCOUNT_NAME>
+[validating public key] 0x<PUBKEY>
+```
+
+The public keys should match the `pubkey` fields in your `deposit_data-*.json`. Once the validator is running and the deposit is active, confirm it attests.
+
+## Remove an account
+
+```bash
+./prysm.sh validator accounts delete \
+  --wallet-dir=./wallet \
+  --delete-public-keys=<PUBKEY>
+```
+
+Deleting a key from the wallet doesn't exit the validator. It stays active and loses balance while nothing signs for it. To stop for good, exit the validator.
+
+## Troubleshooting
+
+**`incorrect password for key 0x...`** The keystore password is wrong. With <Flag name="account-password-file" bin="validator" />, check for a trailing newline.
+
+**`password did not pass validation`** The wallet password must be at least 8 characters.
+
+**The validator doesn't see my keys.** The import and the validator used different wallet folders. Pass the same <Flag name="wallet-dir" bin="validator" /> to both; with Docker, mount the same host folder.

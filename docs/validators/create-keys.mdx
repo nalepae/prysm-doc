@@ -1,0 +1,134 @@
+---
+title: "Create validator keys [TBR]"
+description: "Generate a mnemonic, validator keystores and a deposit data file with the EthStaker deposit CLI."
+---
+
+import { Steps, Tabs, TabItem, FileTree } from '@site/src/components/ui';
+
+Each validator needs a signing key and a withdrawal address. You create both with the [EthStaker deposit CLI](https://github.com/ethstaker/ethstaker-deposit-cli), which writes a 24-word mnemonic, one keystore file per validator, and a deposit data file for the Staking Launchpad.
+
+{/* Verified against ethstaker-deposit-cli v1.3.0 (latest stable) docs and source, 2026-09. v1.3.1 is a pre-release. */}
+
+## Before you begin
+
+- Pick your **withdrawal address**: an Ethereum address you control, ideally in a hardware wallet. Not an exchange address. It can't be changed later.
+- Decide how many validators you want (32 ETH each for a standard validator).
+
+:::tip[Use an offline machine if you can]
+The mnemonic controls your validators. The safest place to create it is a computer that is not connected to any network, for example a spare laptop with Wi-Fi off, or a live USB system such as Tails. Download and verify the deposit CLI on another machine and copy it over on a USB stick.
+:::
+
+## Generate your keys
+
+<Steps>
+
+1. **Download the deposit CLI** for your platform from the [releases page](https://github.com/ethstaker/ethstaker-deposit-cli/releases) and check its SHA-256 sum against the `.sha256` file next to it. The EF `staking-deposit-cli` is archived; don't use it for new keys.
+
+   Extract the archive. It contains the `deposit` executable (`deposit.exe` on Windows).
+
+2. **Run `new-mnemonic`** from the extracted folder:
+
+   <Tabs syncKey="network">
+   <TabItem label="Hoodi">
+
+   ```bash
+   ./deposit new-mnemonic \
+     --num_validators=1 \
+     --chain=hoodi \
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   </TabItem>
+   <TabItem label="Mainnet">
+
+   ```bash
+   ./deposit new-mnemonic \
+     --num_validators=1 \
+     --chain=mainnet \
+     --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+   ```
+
+   </TabItem>
+   <TabItem label="Sepolia">
+
+   Sepolia's validator set is permissioned, so you can't create a new validator there. Use Hoodi to practice.
+
+   </TabItem>
+   </Tabs>
+
+   Replace `<YOUR_WITHDRAWAL_ADDRESS>` with your address. For a compounding validator, add `--compounding` (see below). On Windows, run `deposit.exe`.
+
+3. **Answer the prompts.** Choose the mnemonic language and a **keystore password**. You type this password again when you import the keys into Prysm. Confirm the withdrawal address when asked.
+
+4. **Write down the mnemonic.** The CLI shows 24 words, then asks you to type them back. Store them on paper or steel, in more than one safe place, and never type them into a website or an online machine.
+
+5. **Check the success message:**
+
+   ```text
+   Success!
+   Your keys can be found at: <FOLDER>/validator_keys
+   ```
+
+</Steps>
+
+:::danger[The mnemonic is the master key]
+Anyone with your mnemonic can sign with your validators. If you lose it and your keystores, you can't recover the validators.
+:::
+
+## Regular or compounding
+
+| Type | Created with | What happens to rewards |
+| --- | --- | --- |
+| Regular (`0x01`) | Default when you give a withdrawal address | Anything above 32 ETH is paid to your withdrawal address automatically |
+| Compounding (`0x02`) | `--compounding` | Rewards stay staked and earn more, up to 2048 ETH per validator; you withdraw on request |
+
+Pick regular if you want rewards paid out and one validator per 32 ETH. Pick compounding if you want rewards to compound or one validator with more than 32 ETH (add `--amount=<ETH>`, from 1 to 2048). A regular validator can be upgraded to compounding later, but not back. See [Keys and withdrawal credentials](/learn/keys-and-withdrawals/).
+
+If you leave the withdrawal address out, the CLI creates legacy `0x00` credentials, and you would need your mnemonic again later to add an address. Always give one.
+
+:::caution[Defaults change in the next release]
+The v1.3.1 pre-release defaults to compounding. Pass the credential type explicitly in scripts, and read the release notes of the version you download.
+:::
+
+## What you get
+
+<FileTree>
+- validator_keys/
+  - keystore-m_12381_3600_0_0_0-\<TIMESTAMP\>.json one keystore per validator, encrypted with your keystore password
+  - deposit_data-\<TIMESTAMP\>.json one entry per validator, uploaded to the launchpad
+</FileTree>
+
+- The **keystores** go to your validator machine.
+- The **deposit data** file contains no secrets.
+
+Back up the keystores and their password. They're enough to run the validators; the mnemonic is enough to recreate everything.
+
+## Add more validators later
+
+Run `existing-mnemonic` with the number of keys you already have, so it doesn't recreate them:
+
+```bash
+./deposit existing-mnemonic \
+  --validator_start_index=<NUMBER_OF_EXISTING_KEYS> \
+  --num_validators=<HOW_MANY_NEW> \
+  --chain=hoodi \
+  --withdrawal_address=<YOUR_WITHDRAWAL_ADDRESS>
+```
+
+If you have 4 validators (indices 0 to 3), use `--validator_start_index=4`. Index 0 recreates your first keys exactly, which is how you recover lost keystores.
+
+:::danger
+Only import recreated keys after the validator client that used them is stopped for good. The same key running in two places gets slashed. See [Avoid slashing](/validators/avoid-slashing/).
+:::
+
+## Check that it works
+
+- The CLI printed `Success!`. Before printing it, it decrypts every keystore and checks the deposit data; if either check fails it stops with an error.
+- `validator_keys` holds one `keystore-m_*.json` per validator and one `deposit_data-*.json`.
+- In `deposit_data-*.json`, each `withdrawal_credentials` starts with `01` (or `02` for compounding) and ends with your withdrawal address in lowercase, without `0x`. `network_name` matches your network.
+
+## Troubleshooting
+
+**The launchpad rejects the deposit file.** Usually the keys were made for another `--chain`. Recreate them with `existing-mnemonic`, `--validator_start_index=0` and the right chain.
+
+**I made keys without a withdrawal address.** Before depositing, recreate them with `existing-mnemonic` and `--withdrawal_address`. You get the same signing keys with an address.

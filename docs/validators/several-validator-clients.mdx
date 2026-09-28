@@ -1,0 +1,59 @@
+---
+title: "Run several validator clients [TBR]"
+description: "Run more than one Prysm validator client on the same beacon node, with separate wallets, data directories, ports and fee recipients."
+---
+
+import Flag from '@site/src/components/Flag';
+import TopologyDiagram from '@site/src/components/diagrams/TopologyDiagram';
+
+One validator client can run many keys, and per-key fee recipients go in a [proposer settings file](/validators/fee-recipient/). Run separate validator clients only when key sets must stay apart: keys belonging to different people, or keys you want to restart or move independently.
+
+## Before you begin
+
+- A synced beacon node. See the [Quickstart](/get-started/quickstart/).
+- Keys for each client, imported into its own wallet. See [Import keys](/validators/import-keys/).
+
+## Give each client its own settings
+
+<TopologyDiagram variant="multi-vc" />
+
+Everything that holds state or listens on a port must be different for each validator client:
+
+| Setting | Flag | Client A | Client B |
+| --- | --- | --- | --- |
+| Wallet | <Flag name="wallet-dir" bin="validator" /> | `/var/lib/ethereum/validator-a/wallet` | `/var/lib/ethereum/validator-b/wallet` |
+| Data, including slashing protection | <Flag name="datadir" bin="validator" /> | `/var/lib/ethereum/validator-a` | `/var/lib/ethereum/validator-b` |
+| HTTP API port | <Flag name="http-port" bin="validator" /> | `7500` (default) | `7501` |
+| Metrics port | <Flag name="monitoring-port" bin="validator" /> | `8081` (default) | `8082` |
+| Fee recipient | <Flag name="suggested-fee-recipient" bin="validator" /> | A's address | B's address |
+
+Both point at the same beacon node with the default <Flag name="beacon-rpc-provider" bin="validator" /> (`127.0.0.1:4000`). For example, the second client:
+
+```bash
+./prysm.sh validator \
+  --hoodi \
+  --datadir=/var/lib/ethereum/validator-b \
+  --wallet-dir=/var/lib/ethereum/validator-b/wallet \
+  --wallet-password-file=/var/lib/ethereum/validator-b/password.txt \
+  --http-port=7501 \
+  --monitoring-port=8082 \
+  --suggested-fee-recipient=<FEE_RECIPIENT_FOR_B>
+```
+
+As services, create one unit or compose service per client, each with its own system user, following [Run with Docker Compose](/setup/run-with-docker-compose/) or [Run with systemd](/setup/run-with-systemd/).
+
+:::danger[Never load the same key in two validator clients]
+Their slashing protection databases are separate, so neither can stop the other from signing a conflicting message, and the key gets slashed. Before you move a key between clients, stop the first one and remove the key from it. See [Avoid slashing](/validators/avoid-slashing/).
+:::
+
+Every validator you attach adds work and stored blob data to the beacon node, and if the beacon node goes down, all the clients stop. Watch its CPU use.
+
+## Check that it works
+
+Each client's startup log reports only its own keys, and this answers on the second client's port:
+
+```bash
+curl -s http://127.0.0.1:8082/metrics | head -n 3
+```
+
+`address already in use` at startup means two clients share a port.
